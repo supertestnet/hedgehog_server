@@ -301,7 +301,7 @@ var hedgehog = {
             vout: tx2.vout,
         });
     },
-    getTxData: ( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash, midstate_scripts_override ) => {
+    getTxData: ( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash, midstate_scripts_override, pending_htlcs = [], do_not_delete ) => {
         //prepare variables necessary for returning the required txdata
         var state = hedgehog.state[ chan_id ];
         var uses_htlc = !!htlc_addy_and_amnt;
@@ -322,7 +322,7 @@ var hedgehog = {
         //preimage and hash they created after sending that tx, because you are replacing
         //that state with a new one that sends the recipient more money, and that new
         //state will use a different revocation preimage and hash
-        if ( sender_previously_sent ) {
+        if ( sender_previously_sent && !do_not_delete ) {
             if ( am_sender ) {
                 if ( am_alice ) {
                     state.alices_revocation_preimages.pop();
@@ -366,13 +366,17 @@ var hedgehog = {
         if ( !state.channel_states.length ) recipients_new_balance = recipients_new_balance - 240 - 240;
 
         //if the user was the last to send, modify recipients_new_balance so that it is
-        //the previous amount sent plus the new amount
+        //the previous amount sent plus the new amount -- unless the last transaction
+        //sent money via an htlc, because then the previous amount sent was really 0
         if ( sender_previously_sent ) {
             var prev_state = state.channel_states[ state.channel_states.length - 1 ];
-            var amnt_recipient_had = prev_state.amnt + 240 + 240 - prev_state.amnt_sent;
-            var amnt_sent_previously = prev_state.amnt_sent;
-            if ( am_sender )  amnt = amnt_sent_previously + amnt;
-            var recipients_new_balance = amnt_recipient_had + amnt - 240 - 240;
+            var prev_update_added_htlc = prev_state.added_htlc;
+            if ( !prev_update_added_htlc ) {
+                var amnt_recipient_had = prev_state.amnt + 240 + 240 - prev_state.amnt_sent;
+                var amnt_sent_previously = prev_state.amnt_sent;
+                if ( am_sender ) amnt = amnt_sent_previously + amnt;
+                var recipients_new_balance = amnt_recipient_had + amnt - 240 - 240;
+            }
         }
 
         //in an htlc is used, the recipient's balance should not change
@@ -381,13 +385,11 @@ var hedgehog = {
         //prepare tx2
         var sum_of_senders_htlcs = 0;
         var latest_state = state.channel_states[ state.channel_states.length - 1 ];
-        var pending_htlcs = [];
         //TODO: instead of getting *all* pending htlcs, just get the ones relevant
         //to the current transaction -- e.g. if you are creating a justice tx for
         //a state many states ago, some pending htlcs may have been created *after*
         //that state and thus should be ignored when creating the justice transaction
         //perhaps I should pass the relevant htlcs to this function as a parameter
-        if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
         pending_htlcs.forEach( htlc => {
             if ( ( am_alice && htlc.sender === "alice" ) || ( !am_alice && htlc.sender === "bob" ) ) sum_of_senders_htlcs = sum_of_senders_htlcs + htlc.amnt;
         });
@@ -618,7 +620,7 @@ var hedgehog = {
             return initial_state_is_valid;
         }
     },
-    send: async ( chan_id, amnt ) => {
+    send: async ( chan_id, amnt, overwrite_pending_htlcs ) => {
         //prepare the variables you need to send money
         var state = hedgehog.state[ chan_id ];
         var am_sender = true;
@@ -627,7 +629,11 @@ var hedgehog = {
         var sender = am_alice ? "alice" : "bob";
 
         //get the transaction data
-        var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender );
+        var pending_htlcs = [];
+        var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+        if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+        if ( overwrite_pending_htlcs ) pending_htlcs = overwrite_pending_htlcs;
+        var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, null, null, null, pending_htlcs );
         var [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
         //getTxData always returns 10 items. It also returns two additional items if a conditional revocation was needed on a prior state, so in that cirucmstance we also grab those two additional items so that we can sign them
         if ( txs.length > 10 ) {
@@ -649,6 +655,7 @@ var hedgehog = {
             tx1: tapscript.Tx.encode( tx1 ).hex,
             absolute_revocation_hash,
             added_htlc: false,
+            pending_htlcs,
             absolute_revocation_preimage: null,
             conditional_revocation_sig: null,
             conditional_revocation_vout: null,
@@ -684,7 +691,7 @@ var hedgehog = {
         if ( absolute_revocation_needed ) obj[ "absolute_revocation_preimage" ] = absolute_revocation_needed;
         return obj;
     },
-    receive: async data_from_sender => {
+    receive: async ( data_from_sender, overwrite_pending_htlcs ) => {
         //prepare the variables necessary for validating the new state
         var chan_id = data_from_sender.chan_id;
         if ( chan_id.startsWith( "a_" ) ) chan_id = "b_" + chan_id.substring( 2 );
@@ -702,7 +709,11 @@ var hedgehog = {
         if ( counterpartys_revhashes.includes( revocation_hash ) ) return;
 
         //get the transaction data
-        var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender );
+        var pending_htlcs = [];
+        var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+        if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+        if ( overwrite_pending_htlcs ) pending_htlcs = overwrite_pending_htlcs;
+        var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, null, null, null, pending_htlcs );
         var [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
         //getTxData always returns 10 items. It also returns two additional items if a conditional revocation was needed on a prior state, so in that cirucmstance we also grab those two additional items so that we can validate the signatures involving them
         if ( txs.length > 10 ) {
@@ -759,6 +770,7 @@ var hedgehog = {
             tx1: tapscript.Tx.encode( tx1 ).hex,
             absolute_revocation_hash,
             added_htlc: false,
+            pending_htlcs,
             //it seems unnecessary for the recipient to reserve a
             //place for tracking whether or not they themselves
             //revoked a state because they will simply never
@@ -837,7 +849,11 @@ var hedgehog = {
         var recipients_version_of_tx1 = hedgehog.getTx1( chan_id, am_sender_for_recipients_version, htlc_addy_and_amnt );
         var sender = am_sender === am_alice ? "alice" : "bob";
         var use_custom_midstate_revhash = true;
-        var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash );
+        var pending_htlcs = [];
+        var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+        if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+        var do_not_delete = true;
+        var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash, null, pending_htlcs, do_not_delete );
         var [ _, _, _, _, _, _, _, _, _, recipients_tx2 ] = txs;
         var senders_version_of_tx1_txid = tapscript.Tx.util.getTxid( senders_version_of_tx1 );
         var recipients_version_of_tx1_txid = tapscript.Tx.util.getTxid( recipients_version_of_tx1 );
@@ -1004,7 +1020,6 @@ var hedgehog = {
 
         //send the data object to your counterparty
         data_for_counterparty[ "pmthash" ] = pmthash;
-        var s_recovery_p2_revhash = await hedgehog.sha256( hedgehog.hexToBytes( s_recovery_p2_rev_preimage ) );
         data_for_counterparty[ "s_recovery_p2_revhash" ] = s_recovery_p2_revhash;
         var reply_from_counterparty = await hedgehog.communicateWithUser( data_for_counterparty );
         // var reply_from_counterparty = await hedgehog.receiveHtlcPartTwo( data_for_counterparty );
@@ -1040,7 +1055,11 @@ var hedgehog = {
         var midstate_scripts_override = hedgehog.getMidstateScripts( chan_id, am_sender_for_script_override, s_midstate_revhash, uses_htlc_for_script_override, sender_is_funder_for_script_override, creating_counterparties_version_for_script_override );
         var midstate_tree_override = hedgehog.getAddressData( midstate_scripts_override, 0 )[ 1 ];
         var use_custom_midstate_revhash = null;
-        var txs = hedgehog.getTxData( chan_id, am_alice_for_tx1, am_sender, amnt, sender_for_tx1, htlc_addy_and_amnt, use_custom_midstate_revhash, midstate_scripts_override );
+        var pending_htlcs = [];
+        var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+        if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+        var do_not_delete = true;
+        var txs = hedgehog.getTxData( chan_id, am_alice_for_tx1, am_sender, amnt, sender_for_tx1, htlc_addy_and_amnt, use_custom_midstate_revhash, midstate_scripts_override, pending_htlcs, do_not_delete );
         var [ _, _, _, _, _, _, _, _, senders_tx1, senders_tx2 ] = txs;
         var senders_pub = state.alices_pub;
         if ( !am_alice ) var senders_pub = state.bobs_pub;
@@ -1066,7 +1085,11 @@ var hedgehog = {
         var htlc_addy_and_amnt = [ recipients_initial_htlc_addy, amnt, !sender_is_funder, r_midstate_revhash, creating_counterparties_version, sender_of_htlc ];
         var sender = "bob";
         var use_custom_midstate_revhash = true;
-        var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash );
+        var pending_htlcs = [];
+        var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+        if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+        var do_not_delete = true;
+        var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash, null, pending_htlcs, do_not_delete );
         var [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
         //getTxData always returns 10 items. It also returns two additional items if a conditional revocation was needed on a prior state, so in that cirucmstance we also grab those two additional items so that we can sign them
         if ( txs.length > 10 ) {
@@ -1091,9 +1114,9 @@ var hedgehog = {
         pending_htlcs.push({
             pmt_preimage,
             pmthash,
-            s_midstate_rev_preimage: null,
+            s_midstate_rev_preimage,
             s_midstate_revhash,
-            s_recovery_p2_rev_preimage: null,
+            s_recovery_p2_rev_preimage,
             s_recovery_p2_revhash,
             recipients_rev_preimages: null,
             recipients_revhashes,
@@ -1105,7 +1128,7 @@ var hedgehog = {
         var ch_state = {
             from: sender,
             amnt: recipients_new_balance,
-            amnt_sent: amnt,
+            amnt_sent: 0,
             tx1: tapscript.Tx.encode( tx1 ).hex,
             absolute_revocation_hash,
             absolute_revocation_preimage: null,
@@ -1232,7 +1255,11 @@ var hedgehog = {
         var htlc_addy_and_amnt = [ senders_initial_htlc_addy, amnt, sender_is_funder, s_midstate_revhash, creating_counterparties_version, sender_of_htlc ];
         var sender = am_alice ? "alice" : "bob";
         var am_sender_for_tx1 = true;
-        var txs = hedgehog.getTxData( chan_id, am_alice, am_sender_for_tx1, amnt, sender, htlc_addy_and_amnt );
+        var pending_htlcs = [];
+        var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+        if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+        var do_not_delete = true;
+        var txs = hedgehog.getTxData( chan_id, am_alice, am_sender_for_tx1, amnt, sender, htlc_addy_and_amnt, null, null, pending_htlcs, do_not_delete );
         var [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
         tx2.vin[ 0 ].prevout.scriptPubKey = tx1.vout[ 0 ].scriptPubKey;
         var senders_tx2_sighash = tapscript.Signer.taproot.hash( tx2, 0, {extension: midstate_tree[ 0 ] }).hex;
@@ -1338,7 +1365,7 @@ var hedgehog = {
         var ch_state = {
             from: sender,
             amnt: recipients_new_balance,
-            amnt_sent: amnt,
+            amnt_sent: 0,
             to_midstate_sig,
             finalizer_sig,
             tx1: tapscript.Tx.encode( recipients_version_of_tx1 ).hex,
@@ -1350,9 +1377,13 @@ var hedgehog = {
 
         //revoke all old states
         var my_revocation_preimages = state.alices_revocation_preimages;
-        if ( !am_alice ) my_revocation_preimages = state.bobs_revocation_preimages;
+        var my_revocation_hashes = state.alices_revocation_hashes;
+        if ( !am_alice ) {
+            my_revocation_preimages = state.bobs_revocation_preimages;
+            my_revocation_hashes = state.bobs_revocation_hashes;
+        }
         var data_for_sender = {}
-        if ( my_revocation_preimages.length ) data_for_sender[ "revocation_of_previous_state" ] = my_revocation_preimages[ my_revocation_preimages.length - 1 ];
+        if ( my_revocation_preimages.length > 1 ) data_for_sender[ "revocation_of_previous_state" ] = my_revocation_preimages[ my_revocation_preimages.length - 2 ];
         return data_for_sender;
     },
     findPreimage: async ( chan_id, pmthash ) => {
@@ -2214,6 +2245,20 @@ var hedgehog_server = {
     data_for_channel_opens: {},
     two_way_comms: {},
     comms_keys: {},
+    isValidHex: hex => {
+        if ( !hex ) return;
+        var length = hex.length;
+        if ( length % 2 ) return;
+        try {
+            var bigint = BigInt( "0x" + hex, "hex" );
+        } catch( e ) {
+            return;
+        }
+        var prepad = bigint.toString( 16 );
+        var i; for ( i=0; i<length; i++ ) prepad = "0" + prepad;
+        var padding = prepad.slice( -Math.abs( length ) );
+        return ( padding === hex );
+    },
     listenOnNostr: async nostr_pubkey => {
         var listenFunction = async socket => {
             var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
@@ -2411,7 +2456,6 @@ var hedgehog_server = {
 
                     //wait til fee invoice is pending
                     var loop = async () => {
-                        console.log( 'checking if fee invoice is paid...' );
                         var error = null;
                         var method = "check_hold_invoice";
                         var params = {
@@ -2425,7 +2469,6 @@ var hedgehog_server = {
                         //TODO: if there is an error, return it
 
                         if ( fee_invoice_is_paid ) return;
-                        console.log( 'not paid yet' );
                         await super_nostr.waitSomeSeconds( 1 );
                         return loop();
                     }
@@ -2490,7 +2533,6 @@ var hedgehog_server = {
 
                     //wait til ln invoice is pending
                     var loop = async () => {
-                        console.log( 'checking if ln invoice is paid...' );
                         var error = null;
                         var method = "check_hold_invoice";
                         var params = {
@@ -2504,11 +2546,12 @@ var hedgehog_server = {
                         //TODO: if there is an error, return it
 
                         if ( ln_invoice_is_paid ) return;
-                        console.log( 'not paid yet' );
                         await super_nostr.waitSomeSeconds( 1 );
                         return loop();
                     }
                     var ln_invoice_is_paid = await loop();
+
+                    //tell user invoice is paid
                     var message_for_user = JSON.stringify({
                         msg_type: "ln_invoice_paid",
                         msg_value: 'ln invoice is paid',
@@ -2531,8 +2574,9 @@ var hedgehog_server = {
                     var htlc_pmthash = ln_invoice_pmthash;
                     hedgehog_server.comms_keys[ chan_id ] = user_pubkey;
                     console.log( 'sending htlc!' );
-                    await hedgehog.sendHtlc( chan_id, htlc_amnt, htlc_locktime, htlc_pmthash, block_when_i_must_force_close );
-                    console.log( 'htlc is sent -- now set a reminder for when to force close the channel' );
+                    var success_pmthash = await hedgehog.sendHtlc( chan_id, htlc_amnt, htlc_locktime, htlc_pmthash, block_when_i_must_force_close );
+                    if ( success_pmthash !== ln_invoice_pmthash ) return `error: ${success_pmthash}`;
+                    console.log( 'htlc is sent' );
                 }
                 if ( json.msg_type === "request_ln_resolution_of_pmt_to_user" ) {
                     //prepare the needed variables
@@ -2541,7 +2585,59 @@ var hedgehog_server = {
                     var user_pubkey = event.pubkey;
                     var chan_id = "b_" + json.msg_value.chan_id.substring( 2 );
                     var preimage = json.msg_value.preimage;
-                    console.log( preimage );
+                    var state = hedgehog.state[ chan_id ];
+
+                    //settle any inbound LN invoices that use that preimage
+                    var method = 'settle_hold_invoice';
+                    var params = {preimage};
+                    queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+
+                    //validate the preimage
+                    var preimage_is_hex = hedgehog_server.isValidHex( preimage );
+                    var preimage_is_right_length = preimage.length === 64;
+                    if ( !preimage_is_hex || !preimage_is_right_length ) {
+                        //TODO: force close the channel
+                        return console.log( 'time to close the channel', preimage_is_hex, preimage_is_right_length, preimage );
+                    }
+
+                    //find the corresponding htlc
+                    var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
+                    console.log( pmthash );
+                    var index_of_pending_htlc = -1;
+                    var amnt_of_pending_htlc = null;
+                    var pending_htlcs = [];
+                    var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                    if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+                    pending_htlcs.every( ( htlc, index ) => {
+                        if ( htlc.pmthash !== pmthash ) return true;
+                        index_of_pending_htlc = index;
+                        amnt_of_pending_htlc = htlc.amnt;
+                    });
+                    if ( index_of_pending_htlc < 0 ) {
+                        //TODO: force close the channel
+                        return console.log( 'time to close the channel' );
+                    }
+
+                    //create a pending_htlcs array without that htlc
+                    var new_pending_htlcs = JSON.parse( JSON.stringify( pending_htlcs ) );
+                    new_pending_htlcs.splice( index_of_pending_htlc, 1 );
+
+                    //create and sign a tx1 and tx2 based on that pending_htlcs array, and with the value of the htlc added to your counterparty's side of the channel, and add the new state to your ch_states array
+                    var amnt = amnt_of_pending_htlc;
+                    var object_for_counterparty = await hedgehog.send( chan_id, amnt, new_pending_htlcs );
+
+                    //get your counterparty to sign the new state
+                    var message_identifier = super_nostr.getPrivkey();
+                    var message_for_user = JSON.stringify({
+                        msg_type: "resolve_ln_to_user_part_two",
+                        msg_value: {...object_for_counterparty, message_identifier},
+                    });
+                    console.log( 'replying:', message_for_user );
+                    var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
+                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
+                    super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+
+                    //revoke all prior states
                 }
             }
             catch ( e ) {
