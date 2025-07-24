@@ -279,7 +279,7 @@
                         vout: tx2.vout,
                     });
                 },
-                getTxData: ( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash, midstate_scripts_override ) => {
+                getTxData: ( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash, midstate_scripts_override, pending_htlcs = [], do_not_delete ) => {
                     //prepare variables necessary for returning the required txdata
                     var state = hedgehog.state[ chan_id ];
                     var uses_htlc = !!htlc_addy_and_amnt;
@@ -300,7 +300,7 @@
                     //preimage and hash they created after sending that tx, because you are replacing
                     //that state with a new one that sends the recipient more money, and that new
                     //state will use a different revocation preimage and hash
-                    if ( sender_previously_sent ) {
+                    if ( sender_previously_sent && !do_not_delete ) {
                         if ( am_sender ) {
                             if ( am_alice ) {
                                 state.alices_revocation_preimages.pop();
@@ -344,13 +344,17 @@
                     if ( !state.channel_states.length ) recipients_new_balance = recipients_new_balance - 240 - 240;
 
                     //if the user was the last to send, modify recipients_new_balance so that it is
-                    //the previous amount sent plus the new amount
+                    //the previous amount sent plus the new amount -- unless the last transaction
+                    //sent money via an htlc, because then the previous amount sent was really 0
                     if ( sender_previously_sent ) {
                         var prev_state = state.channel_states[ state.channel_states.length - 1 ];
-                        var amnt_recipient_had = prev_state.amnt + 240 + 240 - prev_state.amnt_sent;
-                        var amnt_sent_previously = prev_state.amnt_sent;
-                        if ( am_sender )  amnt = amnt_sent_previously + amnt;
-                        var recipients_new_balance = amnt_recipient_had + amnt - 240 - 240;
+                        var prev_update_added_htlc = prev_state.added_htlc;
+                        if ( !prev_update_added_htlc ) {
+                            var amnt_recipient_had = prev_state.amnt + 240 + 240 - prev_state.amnt_sent;
+                            var amnt_sent_previously = prev_state.amnt_sent;
+                            if ( am_sender ) amnt = amnt_sent_previously + amnt;
+                            var recipients_new_balance = amnt_recipient_had + amnt - 240 - 240;
+                        }
                     }
 
                     //in an htlc is used, the recipient's balance should not change
@@ -359,13 +363,11 @@
                     //prepare tx2
                     var sum_of_senders_htlcs = 0;
                     var latest_state = state.channel_states[ state.channel_states.length - 1 ];
-                    var pending_htlcs = [];
                     //TODO: instead of getting *all* pending htlcs, just get the ones relevant
                     //to the current transaction -- e.g. if you are creating a justice tx for
                     //a state many states ago, some pending htlcs may have been created *after*
                     //that state and thus should be ignored when creating the justice transaction
                     //perhaps I should pass the relevant htlcs to this function as a parameter
-                    if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
                     pending_htlcs.forEach( htlc => {
                         if ( ( am_alice && htlc.sender === "alice" ) || ( !am_alice && htlc.sender === "bob" ) ) sum_of_senders_htlcs = sum_of_senders_htlcs + htlc.amnt;
                     });
@@ -596,7 +598,7 @@
                         return initial_state_is_valid;
                     }
                 },
-                send: async ( chan_id, amnt ) => {
+                send: async ( chan_id, amnt, overwrite_pending_htlcs ) => {
                     //prepare the variables you need to send money
                     var state = hedgehog.state[ chan_id ];
                     var am_sender = true;
@@ -605,7 +607,11 @@
                     var sender = am_alice ? "alice" : "bob";
 
                     //get the transaction data
-                    var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender );
+                    var pending_htlcs = [];
+                    var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                    if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+                    if ( overwrite_pending_htlcs ) pending_htlcs = overwrite_pending_htlcs;
+                    var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, null, null, null, pending_htlcs );
                     var [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
                     //getTxData always returns 10 items. It also returns two additional items if a conditional revocation was needed on a prior state, so in that cirucmstance we also grab those two additional items so that we can sign them
                     if ( txs.length > 10 ) {
@@ -627,6 +633,7 @@
                         tx1: tapscript.Tx.encode( tx1 ).hex,
                         absolute_revocation_hash,
                         added_htlc: false,
+                        pending_htlcs,
                         absolute_revocation_preimage: null,
                         conditional_revocation_sig: null,
                         conditional_revocation_vout: null,
@@ -662,7 +669,7 @@
                     if ( absolute_revocation_needed ) obj[ "absolute_revocation_preimage" ] = absolute_revocation_needed;
                     return obj;
                 },
-                receive: async data_from_sender => {
+                receive: async ( data_from_sender, overwrite_pending_htlcs ) => {
                     //prepare the variables necessary for validating the new state
                     var chan_id = data_from_sender.chan_id;
                     if ( chan_id.startsWith( "a_" ) ) chan_id = "b_" + chan_id.substring( 2 );
@@ -680,7 +687,11 @@
                     if ( counterpartys_revhashes.includes( revocation_hash ) ) return;
 
                     //get the transaction data
-                    var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender );
+                    var pending_htlcs = [];
+                    var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                    if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+                    if ( overwrite_pending_htlcs ) pending_htlcs = overwrite_pending_htlcs;
+                    var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, null, null, null, pending_htlcs );
                     var [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
                     //getTxData always returns 10 items. It also returns two additional items if a conditional revocation was needed on a prior state, so in that cirucmstance we also grab those two additional items so that we can validate the signatures involving them
                     if ( txs.length > 10 ) {
@@ -737,6 +748,7 @@
                         tx1: tapscript.Tx.encode( tx1 ).hex,
                         absolute_revocation_hash,
                         added_htlc: false,
+                        pending_htlcs,
                         //it seems unnecessary for the recipient to reserve a
                         //place for tracking whether or not they themselves
                         //revoked a state because they will simply never
@@ -815,7 +827,11 @@
                     var recipients_version_of_tx1 = hedgehog.getTx1( chan_id, am_sender_for_recipients_version, htlc_addy_and_amnt );
                     var sender = am_sender === am_alice ? "alice" : "bob";
                     var use_custom_midstate_revhash = true;
-                    var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash );
+                    var pending_htlcs = [];
+                    var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                    if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+                    var do_not_delete = true;
+                    var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash, null, pending_htlcs, do_not_delete );
                     var [ _, _, _, _, _, _, _, _, _, recipients_tx2 ] = txs;
                     var senders_version_of_tx1_txid = tapscript.Tx.util.getTxid( senders_version_of_tx1 );
                     var recipients_version_of_tx1_txid = tapscript.Tx.util.getTxid( recipients_version_of_tx1 );
@@ -982,7 +998,6 @@
 
                     //send the data object to your counterparty
                     data_for_counterparty[ "pmthash" ] = pmthash;
-                    var s_recovery_p2_revhash = await hedgehog.sha256( hedgehog.hexToBytes( s_recovery_p2_rev_preimage ) );
                     data_for_counterparty[ "s_recovery_p2_revhash" ] = s_recovery_p2_revhash;
                     var reply_from_counterparty = await hedgehog.communicateWithUser( data_for_counterparty );
                     // var reply_from_counterparty = await hedgehog.receiveHtlcPartTwo( data_for_counterparty );
@@ -1018,7 +1033,11 @@
                     var midstate_scripts_override = hedgehog.getMidstateScripts( chan_id, am_sender_for_script_override, s_midstate_revhash, uses_htlc_for_script_override, sender_is_funder_for_script_override, creating_counterparties_version_for_script_override );
                     var midstate_tree_override = hedgehog.getAddressData( midstate_scripts_override, 0 )[ 1 ];
                     var use_custom_midstate_revhash = null;
-                    var txs = hedgehog.getTxData( chan_id, am_alice_for_tx1, am_sender, amnt, sender_for_tx1, htlc_addy_and_amnt, use_custom_midstate_revhash, midstate_scripts_override );
+                    var pending_htlcs = [];
+                    var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                    if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+                    var do_not_delete = true;
+                    var txs = hedgehog.getTxData( chan_id, am_alice_for_tx1, am_sender, amnt, sender_for_tx1, htlc_addy_and_amnt, use_custom_midstate_revhash, midstate_scripts_override, pending_htlcs, do_not_delete );
                     var [ _, _, _, _, _, _, _, _, senders_tx1, senders_tx2 ] = txs;
                     var senders_pub = state.alices_pub;
                     if ( !am_alice ) var senders_pub = state.bobs_pub;
@@ -1044,7 +1063,11 @@
                     var htlc_addy_and_amnt = [ recipients_initial_htlc_addy, amnt, !sender_is_funder, r_midstate_revhash, creating_counterparties_version, sender_of_htlc ];
                     var sender = "bob";
                     var use_custom_midstate_revhash = true;
-                    var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash );
+                    var pending_htlcs = [];
+                    var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                    if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+                    var do_not_delete = true;
+                    var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash, null, pending_htlcs, do_not_delete );
                     var [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
                     //getTxData always returns 10 items. It also returns two additional items if a conditional revocation was needed on a prior state, so in that cirucmstance we also grab those two additional items so that we can sign them
                     if ( txs.length > 10 ) {
@@ -1069,9 +1092,9 @@
                     pending_htlcs.push({
                         pmt_preimage,
                         pmthash,
-                        s_midstate_rev_preimage: null,
+                        s_midstate_rev_preimage,
                         s_midstate_revhash,
-                        s_recovery_p2_rev_preimage: null,
+                        s_recovery_p2_rev_preimage,
                         s_recovery_p2_revhash,
                         recipients_rev_preimages: null,
                         recipients_revhashes,
@@ -1083,7 +1106,7 @@
                     var ch_state = {
                         from: sender,
                         amnt: recipients_new_balance,
-                        amnt_sent: amnt,
+                        amnt_sent: 0,
                         tx1: tapscript.Tx.encode( tx1 ).hex,
                         absolute_revocation_hash,
                         absolute_revocation_preimage: null,
@@ -1210,7 +1233,11 @@
                     var htlc_addy_and_amnt = [ senders_initial_htlc_addy, amnt, sender_is_funder, s_midstate_revhash, creating_counterparties_version, sender_of_htlc ];
                     var sender = am_alice ? "alice" : "bob";
                     var am_sender_for_tx1 = true;
-                    var txs = hedgehog.getTxData( chan_id, am_alice, am_sender_for_tx1, amnt, sender, htlc_addy_and_amnt );
+                    var pending_htlcs = [];
+                    var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                    if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+                    var do_not_delete = true;
+                    var txs = hedgehog.getTxData( chan_id, am_alice, am_sender_for_tx1, amnt, sender, htlc_addy_and_amnt, null, null, pending_htlcs, do_not_delete );
                     var [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
                     tx2.vin[ 0 ].prevout.scriptPubKey = tx1.vout[ 0 ].scriptPubKey;
                     var senders_tx2_sighash = tapscript.Signer.taproot.hash( tx2, 0, {extension: midstate_tree[ 0 ] }).hex;
@@ -1316,7 +1343,7 @@
                     var ch_state = {
                         from: sender,
                         amnt: recipients_new_balance,
-                        amnt_sent: amnt,
+                        amnt_sent: 0,
                         to_midstate_sig,
                         finalizer_sig,
                         tx1: tapscript.Tx.encode( recipients_version_of_tx1 ).hex,
@@ -1328,9 +1355,13 @@
 
                     //revoke all old states
                     var my_revocation_preimages = state.alices_revocation_preimages;
-                    if ( !am_alice ) my_revocation_preimages = state.bobs_revocation_preimages;
+                    var my_revocation_hashes = state.alices_revocation_hashes;
+                    if ( !am_alice ) {
+                        my_revocation_preimages = state.bobs_revocation_preimages;
+                        my_revocation_hashes = state.bobs_revocation_hashes;
+                    }
                     var data_for_sender = {}
-                    if ( my_revocation_preimages.length ) data_for_sender[ "revocation_of_previous_state" ] = my_revocation_preimages[ my_revocation_preimages.length - 1 ];
+                    if ( my_revocation_preimages.length > 1 ) data_for_sender[ "revocation_of_previous_state" ] = my_revocation_preimages[ my_revocation_preimages.length - 2 ];
                     return data_for_sender;
                 },
                 findPreimage: async ( chan_id, pmthash ) => {
@@ -1914,9 +1945,13 @@
                     $( '.wallet_page' ).classList.add( "hidden" );
                     $( `.${page}` ).classList.remove( "hidden" );
                 },
-                onboard: () => {
+                onboard: async () => {
                     if ( !url_params.hasOwnProperty( "server_id" ) ) {
                         var server_id = prompt( `enter a server id. Don't know one? Ask bitcoiners to recommend you a good hedgehog server and get its server id from them.` );
+                        var url = window.location.protocol + "//" + window.location.hostname + window.location.pathname + `#server_id=${server_id}#onboard=true`;
+                        window.location.href = url;
+                        window.location.reload();
+                        return;
                     } else {
                         var server_id = url_params.server_id;
                     }
@@ -1931,6 +1966,12 @@
                         <p>Store it safely.</p>
                         <p><button class="done_storing_backup_string">Done</button></p>
                     `;
+                    var loop = async () => {
+                        if ( $( '.modal' ) ) return;
+                        await hedgehog_client.waitSomeTime( 100 );
+                        loop();
+                    }
+                    await loop();
                     showModal( content );
                     $( '.done_storing_backup_string' ).onclick = () => {
                         var content = `
@@ -1940,8 +1981,21 @@
                         `;
                         showModal( content );
                         $( '.really_done_storing_backup_string' ).onclick = () => {
-                            hedgehog_client.login( backup_string );
-                            modalVanish();
+                            if ( window.location.href.includes( "onboard=true" ) ) {
+                                url_params.backup_string = backup_string;
+                                var str_to_add = '';
+                                Object.keys( url_params ).forEach( item => {
+                                    if ( item === "onboard" ) return;
+                                    str_to_add = str_to_add + `#${item}=${url_params[ item ]}`;
+                                });
+                                var url = window.location.protocol + "//" + window.location.hostname + window.location.pathname + str_to_add;
+                                window.location.href = url;
+                                window.location.reload();
+                                return;
+                            } else {
+                                hedgehog_client.login( backup_string );
+                                modalVanish();
+                            }
                         }
                     }
                 },
@@ -1950,15 +2004,24 @@
                     hedgehog_client.pubkey = super_nostr.getPubkey( backup_string );
                     hedgehog_client.showPage( 'wallet_page' );
                     hedgehog_client.nostr_privkey = super_nostr.getPrivkey();
+                    if ( url_params.server_id ) {
+                        var server_id = url_params.server_id;
+                        var [ server, relays ] = hedgehog_client.convertNEvent( server_id );
+                        hedgehog_client.server = server;
+                        hedgehog_client.relays = relays;
+                    }
                     //TODO: load data from the nostr relays in your backup string so that you know what relays the server uses, which should be stored there
                     hedgehog_client.listenOnNostr();
                 },
+                openChannel: async () => {
+                    hedgehog_client.makeJITChannelPartOne( 40_000 );
+                },
                 receive: async () => {
-                    var amnt = Number( prompt( `enter the amount you want to receive in sats` ) );
+                    var chan_id = Object.keys( hedgehog.state )[ 0 ];
+                    if ( !chan_id ) return alert( 'open a channel first' );
+                    var amnt = Number( prompt( `enter the amount of sats you want to receive` ) );
                     if ( !amnt ) return;
-                    //TODO: instead of "always" asking for a new channel, first check if you
-                    //can receive the amount using your existing channels. If so, do so
-                    hedgehog_client.makeJITChannelPartOne( amnt );
+                    hedgehog_client.prepToReceiveLNPartOne( chan_id, amnt );
                 },
                 makeJITChannelPartOne: async amount => {
                     var msg_for_server = JSON.stringify({
@@ -1984,6 +2047,7 @@
 
                     //get the message from the server
                     var message_identifier = "channel_request_reply";
+                    delete hedgehog_client.two_way_comms[ message_identifier ];
                     var loop = async () => {
                         await hedgehog_client.waitSomeTime( 100 );
                         if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
@@ -2068,10 +2132,11 @@
                     var pubkey = super_nostr.getPubkey( privkey );
                     var server = hedgehog_client.server;
                     var relays = hedgehog_client.relays;
-                    showModal( `<p>You must buy a channel before you can receive that payment. This invoice will buy you a channel</p><p>${fee_invoice}</p>` );
+                    showModal( `<p>This invoice will buy you a channel with 80k sats of inbound capacity</p><p>${fee_invoice}</p>` );
 
                     //get the message from the server
                     var message_identifier = "channel_init_reply";
+                    delete hedgehog_client.two_way_comms[ message_identifier ];
                     var loop = async () => {
                         await hedgehog_client.waitSomeTime( 100 );
                         if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
@@ -2109,6 +2174,7 @@
 
                     //get the message from the server
                     var message_identifier = "ln_invoice_for_user";
+                    delete hedgehog_client.two_way_comms[ message_identifier ];
                     var loop = async () => {
                         await hedgehog_client.waitSomeTime( 100 );
                         if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
@@ -2131,6 +2197,7 @@
 
                     //get the message from the server
                     var message_identifier = "ln_invoice_paid";
+                    delete hedgehog_client.two_way_comms[ message_identifier ];
                     var loop = async () => {
                         await hedgehog_client.waitSomeTime( 100 );
                         if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
@@ -2141,6 +2208,7 @@
 
                     //get the next message from the server
                     var message_identifier = "two_way_comms";
+                    delete hedgehog_client.two_way_comms[ message_identifier ];
                     var loop = async () => {
                         await hedgehog_client.waitSomeTime( 100 );
                         if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
@@ -2176,6 +2244,7 @@
 
                     //get the next message from the server
                     var message_identifier = "two_way_comms";
+                    delete hedgehog_client.two_way_comms[ message_identifier ];
                     var loop = async () => {
                         await hedgehog_client.waitSomeTime( 100 );
                         if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
@@ -2208,6 +2277,7 @@
 
                     //get the next message from the server
                     var message_identifier = "two_way_comms";
+                    delete hedgehog_client.two_way_comms[ message_identifier ];
                     var loop = async () => {
                         await hedgehog_client.waitSomeTime( 100 );
                         if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
@@ -2237,6 +2307,7 @@
                     var pubkey = super_nostr.getPubkey( privkey );
                     var server = hedgehog_client.server;
                     var relays = hedgehog_client.relays;
+                    var state = hedgehog.state[ chan_id ];
                     showModal( `<p>we have received an htlc and revoked all old states -- now we just have to resolve it</p>` );
 
                     //send channel data to server
@@ -2247,6 +2318,46 @@
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                     super_nostr.sendEvent( event, relays[ 0 ] );
+
+                    //TODO: if the server does not reply in a few seconds, force close
+                    //get the next message from the server
+                    var message_identifier = "resolve_ln_to_user_part_two";
+                    delete hedgehog_client.two_way_comms[ message_identifier ];
+                    var loop = async () => {
+                        await hedgehog_client.waitSomeTime( 100 );
+                        if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
+                        return hedgehog_client.two_way_comms[ message_identifier ];
+                    }
+                    var event = await loop();
+                    delete hedgehog_client.two_way_comms[ message_identifier ];
+
+                    //parse the message from the server
+                    var json = JSON.parse( event.content );
+                    var message_identifier = json.msg_value.message_identifier;
+                    delete json.msg_value[ "message_identifier" ];
+                    var new_state_info = json.msg_value;
+
+                    //find the to-be-resolved htlc
+                    var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
+                    var index_of_pending_htlc = -1;
+                    var amnt_of_pending_htlc = null;
+                    var pending_htlcs = [];
+                    var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                    pending_htlcs = latest_state.pending_htlcs;
+                    pending_htlcs.every( ( htlc, index ) => {
+                        if ( htlc.pmthash !== pmthash ) return true;
+                        index_of_pending_htlc = index;
+                        amnt_of_pending_htlc = htlc.amnt;
+                    });
+
+                    //create a pending_htlcs array without that htlc
+                    var new_pending_htlcs = JSON.parse( JSON.stringify( pending_htlcs ) );
+                    new_pending_htlcs.splice( index_of_pending_htlc, 1 );
+
+                    //create and sign a tx1 and tx2 based on that pending_htlcs array, and with the value of the htlc added to your side of the channel, and add the new state to your ch_states array
+                    var amnt = amnt_of_pending_htlc;
+                    var new_state_is_valid = await hedgehog.receive( new_state_info, new_pending_htlcs );
+                    console.log( 'new_state_is_valid, right?', new_state_is_valid );
                 },
                 listenOnNostr: async () => {
                     var nostr_privkey = hedgehog_client.nostr_privkey;
@@ -2433,6 +2544,7 @@
         <div class="wallet_page hidden">
             <h1>Your wallet</h1>
             <p>Balance: <span class="balance">0</span> sats</p>
+            <p><button class="open_channel">Open channel</button></p>
             <p><button class="receive">Receive</button></p>
             <p><button class="send">Send</button></p>
             <p><button class="exit">Exit</button></p>
@@ -2449,8 +2561,11 @@
                 $( '.onboard_in_log_in' ).onclick = hedgehog_client.onboard;
             }
             $( '.onboard' ).onclick = hedgehog_client.onboard;
+            $( '.open_channel' ).onclick = hedgehog_client.openChannel;
             $( '.receive' ).onclick = hedgehog_client.receive;
             $( '.send' ).onclick = hedgehog_client.send;
+            if ( url_params.onboard ) hedgehog_client.onboard();
+            if ( url_params.backup_string ) hedgehog_client.login( url_params.backup_string );
         </script>
         <div class="black-bg hidden" onclick="modalVanish();"></div>
         <div class="modal hidden"></div>
