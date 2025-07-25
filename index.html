@@ -329,7 +329,7 @@
                     //prepare the variables needed for creating and broadcasting tx2
                     var midstate_scripts = hedgehog.getMidstateScripts( chan_id, am_sender, midstate_revhash, uses_htlc, sender_is_funding_htlc );
                     if ( midstate_scripts_override ) midstate_scripts = midstate_scripts_override;
-                    var absolute_revocation_hash = midstate_scripts[ 2 ][ 1 ];
+                    var absolute_revocation_hash = midstate_scripts[ 2 ][ 4 ];
                     var [ midstate, midstate_tree, midstate_cblock ] = hedgehog.getAddressData( midstate_scripts, 0 );
 
                     //find out how much money the sender and recipient are supposed to get via tx2
@@ -929,6 +929,7 @@
                         pmthash,
                         r_midstate_revhash,
                         r_reveal_p2_revhash,
+                        s_recovery_p2_revhash,
                         senders_version_of_tx1,
                         recipients_version_of_tx1,
                         senders_recovery_part_one_tx,
@@ -2292,6 +2293,8 @@
                     var data_for_htlc_p3 = json.msg_value;
                     delete data_for_htlc_p3[ "message_identifier" ];
                     var data_for_server = await hedgehog.receiveHtlcPartThree( data_for_htlc_p3 );
+                    var pending_htlcs = hedgehog.state[ chan_id ].channel_states[ hedgehog.state[ chan_id ].channel_states.length - 1 ].pending_htlcs;
+                    pending_htlcs[ pending_htlcs.length - 1 ].pmt_preimage = preimage;
 
                     //send channel data to server
                     var msg_for_server = JSON.stringify({
@@ -2308,7 +2311,7 @@
                     var server = hedgehog_client.server;
                     var relays = hedgehog_client.relays;
                     var state = hedgehog.state[ chan_id ];
-                    showModal( `<p>we have received an htlc and revoked all old states -- now we just have to resolve it</p>` );
+                    showModal( `<p>resolving htlc</p>` );
 
                     //send channel data to server
                     var msg_for_server = JSON.stringify({
@@ -2352,12 +2355,77 @@
 
                     //create a pending_htlcs array without that htlc
                     var new_pending_htlcs = JSON.parse( JSON.stringify( pending_htlcs ) );
+                    var htlc_to_remove = JSON.parse( JSON.stringify( pending_htlcs[ index_of_pending_htlc ] ) );
                     new_pending_htlcs.splice( index_of_pending_htlc, 1 );
 
                     //create and sign a tx1 and tx2 based on that pending_htlcs array, and with the value of the htlc added to your side of the channel, and add the new state to your ch_states array
                     var amnt = amnt_of_pending_htlc;
+                    //TODO: force close if the error below is thrown
+                    if ( new_state_info.amnt !== amnt ) return console.log( 'error, your counterparty tried to cheat you by resolving an htlc for a wrong amount' );
                     var new_state_is_valid = await hedgehog.receive( new_state_info, new_pending_htlcs );
-                    console.log( 'new_state_is_valid, right?', new_state_is_valid );
+                    //TODO: force close if the error below is thrown
+                    if ( !new_state_is_valid ) return console.log( 'error, your counterparty tried to cheat you by refusing to resolve an htlc' );
+
+                    //revoke old state and tell counterparty
+                    var state_update = await hedgehog.send( chan_id, 0 );
+                    state_update[ "message_identifier" ] = message_identifier;
+                    var msg_for_server = JSON.stringify({
+                        msg_type: "resolve_ln_to_user_part_three",
+                        msg_value: state_update,
+                    });
+                    var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
+                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
+                    super_nostr.sendEvent( event, relays[ 0 ] );
+
+                    //TODO: if the server does not reply in a few seconds, force close
+                    //get counterparty's revocations
+                    var message_identifier = "resolve_ln_to_user_part_four";
+                    delete hedgehog_client.two_way_comms[ message_identifier ];
+                    var loop = async () => {
+                        await hedgehog_client.waitSomeTime( 100 );
+                        if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
+                        return hedgehog_client.two_way_comms[ message_identifier ];
+                    }
+                    var event = await loop();
+                    delete hedgehog_client.two_way_comms[ message_identifier ];
+
+                    //parse the message from your counterparty
+                    var json = JSON.parse( event.content );
+
+                    //validate the new state
+                    var s_midstate_rev_preimage = json.msg_value.s_midstate_rev_preimage;
+                    var s_recovery_p2_rev_preimage = json.msg_value.s_recovery_p2_rev_preimage;
+                    delete json.msg_value[ "s_midstate_rev_preimage" ];
+                    delete json.msg_value[ "s_recovery_p2_rev_preimage" ];
+                    if ( json.msg_value.amnt !== 0 ) return console.log( 'error, your counterparty tried to cheat by doing a non-blank state update' );
+                    var new_state_is_valid = await hedgehog.receive( json.msg_value, new_pending_htlcs );
+                    //TODO: force close if the error below is thrown
+                    if ( !new_state_is_valid ) return console.log( 'error, your counterparty tried to cheat you by refusing to resolve an htlc' );
+
+                    //verify he revoked his recovery-path and the htlc midstate
+                    var calculated_midstate_hash = await hedgehog.sha256( hedgehog.hexToBytes( s_midstate_rev_preimage ) );
+                    var expected_midstate_hash = htlc_to_remove.s_midstate_revhash;
+                    var calculated_recovery_hash = await hedgehog.sha256( hedgehog.hexToBytes( s_recovery_p2_rev_preimage ) );
+                    var expected_recovery_hash = htlc_to_remove.s_recovery_p2_revhash;
+                    //TODO: force close if the error below is thrown
+                    if ( calculated_midstate_hash !== expected_midstate_hash || calculated_recovery_hash !== expected_recovery_hash ) return console.log( 'error, your counterparty tried to cheat you by sending invalid revocation data' );
+
+                    //save the revocation data
+                    hedgehog.state[ chan_id ].channel_states[ hedgehog.state[ chan_id ].channel_states.length - 4 ].pending_htlcs[ index_of_pending_htlc ].s_midstate_rev_preimage = s_midstate_rev_preimage;
+                    hedgehog.state[ chan_id ].channel_states[ hedgehog.state[ chan_id ].channel_states.length - 4 ].pending_htlcs[ index_of_pending_htlc ].s_recovery_p2_rev_preimage = s_recovery_p2_rev_preimage;
+
+                    //send your counterparty your reveal-path rev_preimage and your htlc midstate rev_preimage
+                    var msg_for_server = JSON.stringify({
+                        msg_type: "resolve_ln_to_user_part_five",
+                        msg_value: {recipients_rev_preimages: htlc_to_remove.recipients_rev_preimages, message_identifier: "resolve_ln_to_user_part_five"},
+                    });
+                    var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
+                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
+                    super_nostr.sendEvent( event, relays[ 0 ] );
+
+                    showModal( 'received' );
+
+                    //return here
                 },
                 listenOnNostr: async () => {
                     var nostr_privkey = hedgehog_client.nostr_privkey;
