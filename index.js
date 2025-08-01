@@ -967,6 +967,7 @@ var hedgehog = {
     sendHtlc: async ( chan_id, amnt, htlc_locktime, pmthash, block_when_i_must_force_close ) => {
         //prepare variables for sending htlc
         var state = hedgehog.state[ chan_id ];
+        if ( !state ) return console.log( 'error, there is no channel with this chan_id:', chan_id, 'available channels:', Object.keys( hedgehog.state ) );
         var am_alice = !!state.alices_priv;
         var privkey = am_alice ? state.alices_priv : state.bobs_priv;
         var pmt_preimage = null;
@@ -2349,6 +2350,53 @@ var hedgehog_server = {
                     hedgehog_server.two_way_comms[ msg_id ] = json.msg_value.data_for_server;
                     return;
                 }
+                if ( json.msg_type === "get_check_status" ) {
+                    //prepare requisite variables
+                    var { encrypted_chan_id, check_pmthash, check_amnt, encryption_pubkey, check_absolute_timelock } = json.msg_value;
+                    var privkey = nostr_privkey;
+                    var counterparty_pubkey = event.pubkey;
+                    var chan_id = await super_nostr.alt_decrypt( privkey, encryption_pubkey, encrypted_chan_id );
+                    chan_id = "b_" + chan_id.substring( 2 );
+                    var error = null;
+                    if ( !hedgehog.state.hasOwnProperty( chan_id ) ) {
+                        error = 'irredeemable';
+                    } else {
+                        var state = hedgehog.state[ chan_id ];
+                        var am_alice = !!state.alices_priv;
+
+                        //find relevant pending htlc
+                        var pmthash = check_pmthash;
+                        var index_of_pending_htlc = -1;
+                        var amnt_of_pending_htlc = null;
+                        var pending_htlcs = [];
+                        var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                        if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+                        if ( !pending_htlcs.length ) error = "irredeemable";
+                        pending_htlcs.every( ( htlc, index ) => {
+                            if ( htlc.pmthash !== pmthash ) return true;
+                            if ( htlc.sender !== "alice" ) return true;
+                            index_of_pending_htlc = index;
+                            amnt_of_pending_htlc = htlc.amnt;
+                        });
+                        if ( index_of_pending_htlc < 0 ) error = "irredeemable";
+
+                        //check timelock info
+                        //TODO: allow absolute timelocks other than 0
+                        if ( check_absolute_timelock !== 0 ) error = "irredeemable";
+
+                        //ensure amount matches
+                        var pending_htlc = pending_htlcs[ index_of_pending_htlc ];
+                        if ( pending_htlc.amnt !== check_amnt ) error = "irredeemable";
+                    }
+
+                    var msg_for_counterparty = JSON.stringify({
+                        msg_type: "get_check_status_reply",
+                        msg_value: error || "redeemable",
+                    });
+                    var emsg = await super_nostr.alt_encrypt( privkey, counterparty_pubkey, msg_for_counterparty );
+                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterparty_pubkey ] ] );
+                    super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                }
                 if ( json.msg_type === "pay_ln_invoice_for_user" ) {
                     //prepare requisite variables
                     var { encrypted_chan_id, invoice, encryption_pubkey } = json.msg_value;
@@ -2370,6 +2418,8 @@ var hedgehog_server = {
                     if ( !pending_htlcs.length ) return console.log( 'aborting because an unknown person wants to resolve an htlc that does not exist' );
                     pending_htlcs.every( ( htlc, index ) => {
                         if ( htlc.pmthash !== pmthash ) return true;
+                        if ( am_alice && htlc.sender === "alice" ) return true;
+                        if ( !am_alice && htlc.sender === "bob" ) return true;
                         index_of_pending_htlc = index;
                         amnt_of_pending_htlc = htlc.amnt;
                     });
@@ -2735,6 +2785,7 @@ var hedgehog_server = {
                     var chan_id = "b_" + json.msg_value.chan_id.substring( 2 );
                     var preimage = json.msg_value.preimage;
                     var state = hedgehog.state[ chan_id ];
+                    var am_alice = !!state.alices_priv;
 
                     //settle any inbound LN invoices that use that preimage
                     var method = 'settle_hold_invoice';
@@ -2760,6 +2811,8 @@ var hedgehog_server = {
                     if ( !pending_htlcs.length ) return console.log( 'error, your counterparty sent you a preimage when you have no pending htlcs' );
                     pending_htlcs.every( ( htlc, index ) => {
                         if ( htlc.pmthash !== pmthash ) return true;
+                        if ( !am_alice && htlc.sender === "alice" ) return true;
+                        if ( am_alice && htlc.sender === "bob" ) return true;
                         index_of_pending_htlc = index;
                         amnt_of_pending_htlc = htlc.amnt;
                     });
@@ -2873,6 +2926,7 @@ var hedgehog_server = {
                     var privkey = nostr_privkey;
                     var user_pubkey = event.pubkey;
                     var state = hedgehog.state[ chan_id ];
+                    var am_alice = !!state.alices_priv;
 
                     //find the to-be-resolved htlc
                     var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
@@ -2885,6 +2939,8 @@ var hedgehog_server = {
                     if ( !pending_htlcs.length ) return console.log( 'error, your counterparty sent you a preimage when you have no pending htlcs' );
                     pending_htlcs.every( ( htlc, index ) => {
                         if ( htlc.pmthash !== pmthash ) return true;
+                        if ( am_alice && htlc.sender === "alice" ) return true;
+                        if ( !am_alice && htlc.sender === "bob" ) return true;
                         index_of_pending_htlc = index;
                         amnt_of_pending_htlc = htlc.amnt;
                     });
