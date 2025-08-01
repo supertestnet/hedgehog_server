@@ -224,12 +224,12 @@
                         vout,
                     });
                 },
-                getTx2: ( chan_id, am_sender, tx1_txid, midstate, recipients_new_balance, sum_of_senders_htlcs = 0 ) => {
+                getTx2: ( chan_id, am_sender, tx1_txid, midstate, recipients_new_balance, sum_of_senders_htlcs = 0, am_alice_for_tx2 ) => {
                     //tx2 is used during a force closure
                     //it takes money from the midstate and creates the latest state
                     //prepare variables necessary for creating tx2
                     var state = hedgehog.state[ chan_id ];
-                    var am_alice = !!state.alices_priv;
+                    var am_alice = am_alice_for_tx2;
                     if ( am_sender && am_alice ) var recipients_pub = state.bobs_pub;
                     if ( am_sender && !am_alice ) var recipients_pub = state.alices_pub;
                     if ( !am_sender && am_alice ) var recipients_pub = state.alices_pub;
@@ -374,7 +374,7 @@
                     if ( htlc_addy_and_amnt ) {
                         if ( ( am_alice && sender_of_htlc === "alice" ) || ( !am_alice && sender_of_htlc === "bob" ) ) sum_of_senders_htlcs = htlc_addy_and_amnt[ 1 ];
                     }
-                    var tx2 = hedgehog.getTx2( chan_id, am_sender, tx1_txid, midstate, recipients_new_balance, sum_of_senders_htlcs );
+                    var tx2 = hedgehog.getTx2( chan_id, am_sender, tx1_txid, midstate, recipients_new_balance, sum_of_senders_htlcs, am_alice );
 
                     //if the sender received money at any point, they must revoke the most recent tx by
                     //which they received money, so we prepare that tx if necessary so they can sign it
@@ -962,7 +962,7 @@
                     var data_for_doing_part_three = await hedgehog.prepareHtlcPartOne( chan_id, amnt, pmthash, am_sender, recipients_revhashes, s_recovery_p2_revhash, s_midstate_revhash, htlc_locktime );
 
                     //save the data you need for doing part three
-                    hedgehog.state[ chan_id ].data_for_preparing_htlcs[ pmthash ] = [ "sender_part_two", data_for_doing_part_three ];
+                    state.data_for_preparing_htlcs[ pmthash ] = [ "sender_part_two", data_for_doing_part_three ];
 
                     var {
                         pmthash,
@@ -1004,7 +1004,7 @@
                     // var reply_from_counterparty = await hedgehog.receiveHtlcPartTwo( data_for_counterparty );
 
                     //TODO: force close if the following error is thrown
-                    if ( !reply_from_counterparty ) return console.log( 'error, your counterparty refused to route your htlc' );
+                    if ( !reply_from_counterparty ) return console.log( 'error, your counterparty rejected your htlc' );
 
                     //prepare variables for validating the counterparty's signatures
                     var { sig_on_senders_recovery_p1_tx, sig_on_recipients_recovery_p1_tx, sig_on_senders_deposit_tx, sig_on_senders_tx2 } = reply_from_counterparty;
@@ -1050,7 +1050,7 @@
                     if ( !sig_on_senders_recovery_p1_tx_is_valid || !sig_on_recipients_recovery_p1_tx_is_valid || !sig_on_deposit_is_valid || !sig_on_senders_tx2_is_valid ) return console.log( 'error, your counterparty sent you invalid signatures' );
 
                     //save the data provided by the counterparty
-                    hedgehog.state[ chan_id ].data_for_preparing_htlcs[ pmthash ] = [ "sender_part_three", {
+                    state.data_for_preparing_htlcs[ pmthash ] = [ "sender_part_three", {
                         ...data_for_doing_part_three,
                         sig_on_senders_recovery_p1_tx,
                         sig_on_recipients_recovery_p1_tx,
@@ -1087,6 +1087,7 @@
                     var finalizer_sig = tapscript.Signer.taproot.sign( privkey, tx2, 0, {extension: midstate_tree[ 0 ] }).hex;
 
                     //update your state
+                    var sender = am_alice ? "alice" : "bob";
                     var latest_state = state.channel_states[ state.channel_states.length - 1 ];
                     var pending_htlcs = [];
                     if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
@@ -1147,7 +1148,7 @@
 
                     //validate and store it
                     var counterpartys_revhashes = state.alices_revocation_hashes;
-                    var counterparties_rev_preimages = state.alices_revocation_preimages;
+                    var counterpartys_rev_preimages = state.alices_revocation_preimages;
                     if ( am_alice ) {
                         counterpartys_revhashes = state.bobs_revocation_hashes;
                         counterpartys_rev_preimages = state.bobs_revocation_preimages;
@@ -1156,14 +1157,18 @@
                     if ( counterpartys_revhashes.length && !data_from_recipient.hasOwnProperty( "revocation_of_previous_state" ) ) return console.log( 'your counterparty tried to cheat you by not sending requisite data' );
                     if ( counterpartys_revhashes.length ) {
                         var revocation_of_previous_state = data_from_recipient.revocation_of_previous_state;
-                        var expected_revhash = counterpartys_revhashes[ counterpartys_revhashes.length - 1 ];
+                        //if your counterparty was the last person to send money, and he did so in a state update that did *not* include an htlc, then he will have a revocation hash that he should *not* revoke here; you will use it next time you send him money, and if he revokes it here, he won't be able to safely receive that money; this also applies if 
+                        var num_of_hashes_behind = 2;
+                        var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                        if ( ( ( latest_state.from === "bob" && am_alice ) || ( latest_state.from === "alice" && !am_alice ) ) && !latest_state.uses_htlc ) num_of_hashes_behind = 2;
+                        var expected_revhash = counterpartys_revhashes[ counterpartys_revhashes.length - num_of_hashes_behind ];
                         if ( typeof revocation_of_previous_state !== "string" ) return console.log( 'error, your counterparty tried to cheat you by sending invalid data' );
                         var actual_revhash = await hedgehog.sha256( hedgehog.hexToBytes( revocation_of_previous_state ) );
-                        if ( actual_revhash !== expected_revhash ) return console.log( 'error, your counterparty tried to cheat you by refusing to revoke the previous state' );
+                        if ( actual_revhash !== expected_revhash ) return console.log( `error, your counterparty tried to cheat you by refusing to revoke the previous state; the rev_preimage they sent you: ${revocation_of_previous_state} | its actual hash: ${actual_revhash} | the revhash you wanted: ${expected_revhash} | all your counterpartys revhashes: ${counterpartys_revhashes}` );
 
                         //add your counterparty's revocation preimage to your state unless you already
                         //have it
-                        if ( !counterparties_rev_preimages.includes( revocation_of_previous_state ) ) counterparties_rev_preimages.push( revocation_of_previous_state );
+                        if ( !counterpartys_rev_preimages.includes( revocation_of_previous_state ) ) counterpartys_rev_preimages.push( revocation_of_previous_state );
                     }
                     return pmthash;
                 },
@@ -1264,7 +1269,7 @@
                     var state = hedgehog.state[ chan_id ];
                     var am_alice = !!state.alices_priv;
                     var counterpartys_revhashes = state.alices_revocation_hashes;
-                    var counterparties_rev_preimages = state.alices_revocation_preimages;
+                    var counterpartys_rev_preimages = state.alices_revocation_preimages;
                     if ( am_alice ) {
                         counterpartys_revhashes = state.bobs_revocation_hashes;
                         counterpartys_rev_preimages = state.bobs_revocation_preimages;
@@ -1279,7 +1284,7 @@
 
                     //add your counterparty's revocation preimage to your state unless you already
                     //have it
-                    if ( !counterparties_rev_preimages.includes( revocation_of_previous_state ) ) counterparties_rev_preimages.push( revocation_of_previous_state );
+                    if ( !counterpartys_rev_preimages.includes( revocation_of_previous_state ) ) counterpartys_rev_preimages.push( revocation_of_previous_state );
 
                     //do not allow the sender to reuse a revocation hash
                     var revocation_hash = data_from_sender.revocation_hash;
@@ -2221,6 +2226,7 @@
                     //tell the user what's up
                     showModal( `<p>Payment detected -- bridging from LN to hedgehog, please wait</p>` );
 
+                    //parse the message from the server
                     var json = JSON.parse( event.content );
                     var message_identifier = json.msg_value.message_identifier;
                     var data_for_htlc_p1 = json.msg_value;
@@ -2293,6 +2299,8 @@
                     var data_for_htlc_p3 = json.msg_value;
                     delete data_for_htlc_p3[ "message_identifier" ];
                     var data_for_server = await hedgehog.receiveHtlcPartThree( data_for_htlc_p3 );
+
+                    //store the preimage to the now-pending htlc
                     var pending_htlcs = hedgehog.state[ chan_id ].channel_states[ hedgehog.state[ chan_id ].channel_states.length - 1 ].pending_htlcs;
                     pending_htlcs[ pending_htlcs.length - 1 ].pmt_preimage = preimage;
 
@@ -2315,7 +2323,7 @@
 
                     //send channel data to server
                     var msg_for_server = JSON.stringify({
-                        msg_type: "request_ln_resolution_of_pmt_to_user",
+                        msg_type: "resolve_htlc_to_user",
                         msg_value: {preimage, chan_id},
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
@@ -2324,7 +2332,7 @@
 
                     //TODO: if the server does not reply in a few seconds, force close
                     //get the next message from the server
-                    var message_identifier = "resolve_ln_to_user_part_two";
+                    var message_identifier = "resolve_htlc_to_user_part_two";
                     delete hedgehog_client.two_way_comms[ message_identifier ];
                     var loop = async () => {
                         await hedgehog_client.waitSomeTime( 100 );
@@ -2370,7 +2378,7 @@
                     var state_update = await hedgehog.send( chan_id, 0 );
                     state_update[ "message_identifier" ] = message_identifier;
                     var msg_for_server = JSON.stringify({
-                        msg_type: "resolve_ln_to_user_part_three",
+                        msg_type: "resolve_htlc_to_user_part_three",
                         msg_value: state_update,
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
@@ -2379,7 +2387,7 @@
 
                     //TODO: if the server does not reply in a few seconds, force close
                     //get counterparty's revocations
-                    var message_identifier = "resolve_ln_to_user_part_four";
+                    var message_identifier = "resolve_htlc_to_user_part_four";
                     delete hedgehog_client.two_way_comms[ message_identifier ];
                     var loop = async () => {
                         await hedgehog_client.waitSomeTime( 100 );
@@ -2416,16 +2424,15 @@
 
                     //send your counterparty your reveal-path rev_preimage and your htlc midstate rev_preimage
                     var msg_for_server = JSON.stringify({
-                        msg_type: "resolve_ln_to_user_part_five",
-                        msg_value: {recipients_rev_preimages: htlc_to_remove.recipients_rev_preimages, message_identifier: "resolve_ln_to_user_part_five"},
+                        msg_type: "resolve_htlc_to_user_part_five",
+                        msg_value: {recipients_rev_preimages: htlc_to_remove.recipients_rev_preimages, message_identifier: "resolve_htlc_to_user_part_five"},
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                     super_nostr.sendEvent( event, relays[ 0 ] );
 
+                    //inform the user what's going on
                     showModal( 'received' );
-
-                    //return here
                 },
                 listenOnNostr: async () => {
                     var nostr_privkey = hedgehog_client.nostr_privkey;
@@ -2449,6 +2456,30 @@
                             event.content = await super_nostr.alt_decrypt( nostr_privkey, event.pubkey, event.content );
                             var json = JSON.parse( event.content );
                             console.log( json );
+                            if ( json.hasOwnProperty( "msg_value" ) && json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "htlc_to_server_part_two" ) {
+                                var msg_id = json.msg_value.message_identifier;
+                                hedgehog_client.two_way_comms[ msg_id ] = json.msg_value.data_for_counterparty;
+                                setTimeout( () => {delete hedgehog_client.two_way_comms[ msg_id ]}, 2000 );
+                                return;
+                            }
+                            if ( json.hasOwnProperty( "msg_value" ) && json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "htlc_to_server_part_four" ) {
+                                var msg_id = json.msg_value.message_identifier;
+                                hedgehog_client.two_way_comms[ msg_id ] = json.msg_value.data_for_counterparty;
+                                setTimeout( () => {delete hedgehog_client.two_way_comms[ msg_id ]}, 2000 );
+                                return;
+                            }
+                            if ( json.hasOwnProperty( "msg_value" ) && json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "htlc_to_server_part_six" ) {
+                                var msg_id = json.msg_value.message_identifier;
+                                hedgehog_client.two_way_comms[ msg_id ] = json.msg_value.data_for_counterparty;
+                                setTimeout( () => {delete hedgehog_client.two_way_comms[ msg_id ]}, 2000 );
+                                return;
+                            }
+                            if ( json.hasOwnProperty( "msg_value" ) && json.msg_type === "resolve_htlc_to_server_part_three" ) {
+                                var msg_id = json.msg_value.message_identifier;
+                                hedgehog_client.two_way_comms[ msg_id ] = event;
+                                setTimeout( () => {delete hedgehog_client.two_way_comms[ msg_id ]}, 2000 );
+                                return;
+                            }
                             hedgehog_client.two_way_comms[ json.msg_type ] = event;
                         }
                         catch ( e ) {
@@ -2495,6 +2526,169 @@
                             resolve( false );
                         });
                     } catch ( e ) {return false;}
+                },
+                send: async ( chan_id, amnt ) => {
+                    var htlc_locktime = 2026;
+                    var worked = await hedgehog.sendHtlc( chan_id, amnt, htlc_locktime );
+                    console.log( 'it worked, right?', !!worked );
+                },
+                resolveHtlcToServer: async ( chan_id, preimage ) => {
+                    var privkey = hedgehog_client.nostr_privkey;
+                    var pubkey = super_nostr.getPubkey( privkey );
+                    var server = hedgehog_client.server;
+                    var relays = hedgehog_client.relays;
+                    var state = hedgehog.state[ chan_id ];
+
+                    //find the relevant htlc
+                    var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
+                    var index_of_pending_htlc = -1;
+                    var amnt_of_pending_htlc = null;
+                    var pending_htlcs = [];
+                    var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                    if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+                    pending_htlcs.every( ( htlc, index ) => {
+                        if ( htlc.pmthash !== pmthash ) return true;
+                        index_of_pending_htlc = index;
+                        amnt_of_pending_htlc = htlc.amnt;
+                    });
+
+                    //create a pending_htlcs array without that htlc
+                    var new_pending_htlcs = JSON.parse( JSON.stringify( pending_htlcs ) );
+                    var htlc_to_remove = JSON.parse( JSON.stringify( pending_htlcs[ index_of_pending_htlc ] ) );
+                    new_pending_htlcs.splice( index_of_pending_htlc, 1 );
+
+                    //create and sign a tx1 and tx2 based on that pending_htlcs array, and with the value of the htlc added to your counterparty's side of the channel, and add the new state to your ch_states array
+                    var amnt = amnt_of_pending_htlc;
+                    console.log( 'my revocation preimages:', state.alices_revocation_preimages, 'my revocation hashes:', state.alices_revocation_hashes );
+                    var object_for_counterparty = await hedgehog.send( chan_id, amnt, new_pending_htlcs );
+                    object_for_counterparty[ "pmt_preimage" ] = preimage;
+
+                    //get your counterparty to sign the new state
+                    var message_identifier = super_nostr.getPrivkey();
+                    var message_for_counterparty = JSON.stringify({
+                        msg_type: "resolve_htlc_to_server_part_two",
+                        msg_value: {...object_for_counterparty, message_identifier},
+                    });
+                    console.log( 'replying:', message_for_counterparty );
+                    var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_counterparty );
+                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
+                    super_nostr.sendEvent( event, relays[ 0 ] );
+
+                    //TODO: if your counterparty does not reply in a few seconds, force close
+                    //get the next message from your counterparty
+                    hedgehog_client.two_way_comms[ message_identifier ] = "waiting_for_info";
+                    var loop = async () => {
+                        await hedgehog_client.waitSomeTime( 100 );
+                        if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) || ( hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) && hedgehog_client.two_way_comms[ message_identifier ] === "waiting_for_info" ) ) return loop();
+                        return hedgehog_client.two_way_comms[ message_identifier ];
+                    }
+                    var event = await loop();
+                    delete hedgehog_client.two_way_comms[ message_identifier ];
+
+                    //parse the message from your counterparty
+                    var json = JSON.parse( event.content );
+                    delete json.msg_value[ "message_identifier" ];
+
+                    //validate the new state
+                    if ( json.msg_value.amnt !== 0 ) return console.log( 'error, your counterparty tried to cheat by doing a non-blank state update' );
+                    var new_state_is_valid = await hedgehog.receive( json.msg_value, new_pending_htlcs );
+                    //TODO: force close if the error below is thrown
+                    if ( !new_state_is_valid ) return console.log( 'error, your counterparty tried to cheat you by refusing to resolve an htlc' );
+
+                    //revoke all prior states
+                    //send your counterparty the following items: your recovery-path rev_preimage, your htlc midstate rev_preimage, and a new blank state update
+                    var state_update = await hedgehog.send( chan_id, 0 );
+                    state_update[ "message_identifier" ] = "resolve_htlc_to_server_part_four";
+                    var message_for_server = JSON.stringify({
+                        msg_type: "resolve_htlc_to_server_part_four",
+                        msg_value: {...state_update, s_midstate_rev_preimage: htlc_to_remove.s_midstate_rev_preimage, s_recovery_p2_rev_preimage: htlc_to_remove.s_recovery_p2_rev_preimage},
+                    });
+                    console.log( 'replying:', message_for_server );
+                    var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_server );
+                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
+                    super_nostr.sendEvent( event, relays[ 0 ] );
+
+                    //TODO: if your counterparty does not reply in a few seconds, force close
+                    //ensure your counterparty sent you their reveal-path revocation preimage, their htlc midstate rev_preimage
+                    var message_identifier = "resolve_htlc_to_server_part_five";
+                    hedgehog_client.two_way_comms[ message_identifier ] = "waiting_for_info";
+                    var loop = async () => {
+                        await hedgehog_client.waitSomeTime( 100 );
+                        if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) || ( hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) && hedgehog_client.two_way_comms[ message_identifier ] === "waiting_for_info" ) ) return loop();
+                        return hedgehog_client.two_way_comms[ message_identifier ];
+                    }
+                    var event = await loop();
+                    delete hedgehog_client.two_way_comms[ message_identifier ];
+
+                    //parse the message from your counterparty
+                    var json = JSON.parse( event.content );
+                    delete json.msg_value[ "message_identifier" ];
+
+                    //verify he revoked his recovery-path and the htlc midstate
+                    var recipients_rev_preimages = json.msg_value.recipients_rev_preimages;
+                    var calculated_midstate_hash = await hedgehog.sha256( hedgehog.hexToBytes( recipients_rev_preimages[ 0 ] ) );
+                    var expected_midstate_hash = htlc_to_remove.recipients_revhashes[ 0 ];
+                    var calculated_reveal_hash = await hedgehog.sha256( hedgehog.hexToBytes( recipients_rev_preimages[ 1 ] ) );
+                    var expected_reveal_hash = htlc_to_remove.recipients_revhashes[ 1 ];
+                    //TODO: force close if the error below is thrown
+                    if ( calculated_midstate_hash !== expected_midstate_hash || calculated_reveal_hash !== expected_reveal_hash ) return console.log( 'error, your counterparty tried to cheat you by sending invalid revocation data' );
+
+                    //save the revocation data
+                    state.channel_states[ state.channel_states.length - 4 ].pending_htlcs[ index_of_pending_htlc ].recipients_rev_preimages = recipients_rev_preimages;
+
+                    console.log( 'htlc resolved' );
+                    return;
+                },
+                setUpComms: async () => {
+                    hedgehog.communicateWithUser = async data_for_counterparty => {
+                        console.log( data_for_counterparty );
+                        var chan_id = data_for_counterparty.chan_id;
+                        var message_identifier = hedgehog.getPrivkey();
+                        if ( data_for_counterparty.hasOwnProperty( "pmthash" ) && data_for_counterparty.hasOwnProperty( "s_midstate_revhash" ) ) {
+                            var more_message_info = "htlc_to_server_part_one";
+                            data_for_counterparty[ "message_identifier" ] = message_identifier;
+                            data_for_counterparty[ "more_message_info" ] = more_message_info;
+                            var msg_for_counterparty = JSON.stringify({
+                                msg_type: "two_way_comms",
+                                msg_value: data_for_counterparty,
+                            });
+                        }
+                        if ( data_for_counterparty.hasOwnProperty( "amnt" ) && data_for_counterparty.hasOwnProperty( "htlc_locktime" ) && data_for_counterparty.hasOwnProperty( "sig_on_recipients_reveal_p1_tx" ) && data_for_counterparty.hasOwnProperty( "sig_on_senders_reveal_p1_tx" ) && data_for_counterparty.hasOwnProperty( "pmthash" ) && data_for_counterparty.hasOwnProperty( "s_recovery_p2_revhash" ) ) {
+                            var more_message_info = "htlc_to_server_part_three";
+                            data_for_counterparty[ "message_identifier" ] = message_identifier;
+                            data_for_counterparty[ "more_message_info" ] = more_message_info;
+                            var msg_for_counterparty = JSON.stringify({
+                                msg_type: "two_way_comms",
+                                msg_value: data_for_counterparty,
+                            });
+                        }
+                        if ( data_for_counterparty.hasOwnProperty( "to_midstate_sig" ) && data_for_counterparty.hasOwnProperty( "finalizer_sig" ) && data_for_counterparty.hasOwnProperty( "revocation_hash" ) && data_for_counterparty.hasOwnProperty( "pmthash" ) && data_for_counterparty.hasOwnProperty( "revocation_of_previous_state" ) ) {
+                            var more_message_info = "htlc_to_server_part_five";
+                            data_for_counterparty[ "message_identifier" ] = message_identifier;
+                            data_for_counterparty[ "more_message_info" ] = more_message_info;
+                            var msg_for_counterparty = JSON.stringify({
+                                msg_type: "two_way_comms",
+                                msg_value: data_for_counterparty,
+                            });
+                        }
+                        console.log( 'sending data:', msg_for_counterparty );
+                        var privkey = hedgehog_client.nostr_privkey;
+                        var pubkey = super_nostr.getPubkey( privkey );
+                        var counterparty_pubkey = hedgehog_client.server;
+                        var relays = hedgehog_client.relays;
+                        var emsg = await super_nostr.alt_encrypt( privkey, counterparty_pubkey, msg_for_counterparty );
+                        var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterparty_pubkey ] ] );
+                        super_nostr.sendEvent( event, relays[ 0 ] );
+
+                        var loop = async () => {
+                            console.log( 'looking for', message_identifier );
+                            await hedgehog_client.waitSomeTime( 100 );
+                            if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
+                            return hedgehog_client.two_way_comms[ message_identifier ];
+                        }
+                        var reply = await loop();
+                        return reply;
+                    }
                 },
                 waitSomeTime: num => new Promise( resolve => setTimeout( resolve, num ) ),
             }
@@ -2618,6 +2812,7 @@
             <p><button class="exit">Exit</button></p>
         </div>
         <script>
+            hedgehog_client.setUpComms();
             $( '.log_in' ).onclick = () => {
                 var content = `
                     <p>Enter your backup string</p>
