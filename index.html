@@ -4,7 +4,10 @@
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, user-scalable=no">
         <title>Hedgehog</title>
+        <script src="https://bundle.run/buffer@6.0.3"></script>
+        <script>var Buffer = buffer.Buffer;</script>
         <script src="https://unpkg.com/@dashincubator/ripemd160/ripemd160.js"></script>
+        <script src="https://supertestnet.github.io/bolt11_browser/bolt11.js"></script>
         <script src="https://supertestnet.github.io/bankify/super_nostr.js"></script>
         <script src="https://unpkg.com/@cmdcode/tapscript@1.5.3"></script>
         <script src="https://bundle.run/noble-secp256k1@1.2.14"></script>
@@ -1042,7 +1045,12 @@
                     var [ _, _, _, _, _, _, _, _, senders_tx1, senders_tx2 ] = txs;
                     var senders_pub = state.alices_pub;
                     if ( !am_alice ) var senders_pub = state.bobs_pub;
-                    senders_tx2.vout[ 1 ].scriptPubKey = [ 1, senders_pub ];
+                    if ( senders_tx2.vout.length < 3 ) {
+                        senders_tx2.vout[ 1 ].scriptPubKey = [ 1, senders_pub ];
+                    } else {
+                        senders_tx2.vout[ 1 ].scriptPubKey = [ 1, state.alices_pub ];
+                        senders_tx2.vout[ 2 ].scriptPubKey = [ 1, state.bobs_pub ];
+                    }
                     var senders_tx2_sighash = tapscript.Signer.taproot.hash( senders_tx2, 0, {extension: midstate_tree_override[ 0 ] }).hex;
                     var sig_on_senders_tx2_is_valid = await nobleSecp256k1.schnorr.verify( sig_on_senders_tx2, senders_tx2_sighash, recipients_pub );
 
@@ -2456,6 +2464,38 @@
                             event.content = await super_nostr.alt_decrypt( nostr_privkey, event.pubkey, event.content );
                             var json = JSON.parse( event.content );
                             console.log( json );
+                            if ( json[ "msg_type" ] === "htlc_to_server_part_zero" ) {
+                                var preimage = json[ "msg_value" ][ "preimage" ];
+                                var chan_id = json[ "msg_value" ][ "chan_id" ];
+                                chan_id = "a_" + chan_id.substring( 2 );
+                                var privkey = hedgehog_client.nostr_privkey;
+                                var pubkey = super_nostr.getPubkey( privkey );
+                                var server = hedgehog_client.server;
+                                var relays = hedgehog_client.relays;
+                                var state = hedgehog.state[ chan_id ];
+
+                                //find the to-be-resolved htlc
+                                var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
+                                var index_of_pending_htlc = -1;
+                                var amnt_of_pending_htlc = null;
+                                var pending_htlcs = [];
+                                var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                                if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+                                //TODO: force close if the error below is thrown
+                                if ( !pending_htlcs.length ) return console.log( 'error, your counterparty sent you a preimage when you have no pending htlcs' );
+                                pending_htlcs.every( ( htlc, index ) => {
+                                    if ( htlc.pmthash !== pmthash ) return true;
+                                    index_of_pending_htlc = index;
+                                    amnt_of_pending_htlc = htlc.amnt;
+                                });
+
+                                //TODO: abort if either of the errors below are thrown
+                                if ( index_of_pending_htlc < 0 ) return console.log( 'aborting because the server tried to cheat you by getting you to resolve an htlc that does not exist' );
+                                if ( pending_htlcs[ index_of_pending_htlc ].sender !== "alice" ) return console.log( 'aborting because the server tried to cheat you by getting you to resolve an htlc you did not create' );
+
+                                hedgehog_client.resolveHtlcToServer( chan_id, preimage );
+                                return;
+                            }
                             if ( json.hasOwnProperty( "msg_value" ) && json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "htlc_to_server_part_two" ) {
                                 var msg_id = json.msg_value.message_identifier;
                                 hedgehog_client.two_way_comms[ msg_id ] = json.msg_value.data_for_counterparty;
@@ -2527,10 +2567,37 @@
                         });
                     } catch ( e ) {return false;}
                 },
-                send: async ( chan_id, amnt ) => {
+                send: async ( chan_id, amnt, pmthash ) => {
                     var htlc_locktime = 2026;
-                    var worked = await hedgehog.sendHtlc( chan_id, amnt, htlc_locktime );
-                    console.log( 'it worked, right?', !!worked );
+                    var worked = await hedgehog.sendHtlc( chan_id, amnt, htlc_locktime, pmthash );
+                    return !!worked;
+                },
+                sendViaLN: async ( chan_id, invoice ) => {
+                    var pmthash = hedgehog_client.getInvoicePmthash( invoice );
+                    var amnt = hedgehog_client.getInvoiceAmount( invoice );
+                    var htlc_pending = await hedgehog_client.send( chan_id, amnt, pmthash );
+                    if ( !htlc_pending ) return console.log( 'error, no htlc was created' );
+                    hedgehog_client.askServerToPayLNInvoice( chan_id, invoice );
+                },
+                askServerToPayLNInvoice: async ( chan_id, invoice ) => {
+                    var privkey = super_nostr.getPrivkey();
+                    var pubkey = super_nostr.getPubkey( privkey );
+                    var server = hedgehog_client.server;
+                    var relays = hedgehog_client.relays;
+
+                    //encrypt the channel id
+                    var encryption_privkey = super_nostr.getPrivkey();
+                    var encryption_pubkey = super_nostr.getPubkey( encryption_privkey );
+                    var encrypted_chan_id = await super_nostr.alt_encrypt( encryption_privkey, server, chan_id );
+
+                    //send invoice to server
+                    var message_for_counterparty = JSON.stringify({
+                        msg_type: "pay_ln_invoice_for_user",
+                        msg_value: {encrypted_chan_id, invoice, encryption_pubkey},
+                    });
+                    var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_counterparty );
+                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
+                    super_nostr.sendEvent( event, relays[ 0 ] );
                 },
                 resolveHtlcToServer: async ( chan_id, preimage ) => {
                     var privkey = hedgehog_client.nostr_privkey;
@@ -2691,6 +2758,17 @@
                     }
                 },
                 waitSomeTime: num => new Promise( resolve => setTimeout( resolve, num ) ),
+                getInvoicePmthash: invoice => {
+                    var decoded = bolt11.decode( invoice );
+                    var i; for ( i=0; i<decoded[ "tags" ].length; i++ ) {
+                        if ( decoded[ "tags" ][ i ][ "tagName" ] === "payment_hash" ) return decoded[ "tags" ][ i ][ "data" ].toString();
+                    }
+                },
+                getInvoiceAmount: invoice => {
+                    var decoded = bolt11.decode( invoice );
+                    var amount = Math.floor( decoded[ "millisatoshis" ] / 1000 ).toString();
+                    return Number( amount );
+                },
             }
         </script>
         <style>
