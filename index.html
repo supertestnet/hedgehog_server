@@ -6,6 +6,7 @@
         <title>Hedgehog</title>
         <script src="https://bundle.run/buffer@6.0.3"></script>
         <script>var Buffer = buffer.Buffer;</script>
+        <script src="https://supertestnet.github.io/bitcoin-chess/js/qrcode.js"></script>
         <script src="https://unpkg.com/@dashincubator/ripemd160/ripemd160.js"></script>
         <script src="https://supertestnet.github.io/bolt11_browser/bolt11.js"></script>
         <script src="https://supertestnet.github.io/bankify/super_nostr.js"></script>
@@ -947,6 +948,7 @@
                 sendHtlc: async ( chan_id, amnt, htlc_locktime, pmthash, block_when_i_must_force_close ) => {
                     //prepare variables for sending htlc
                     var state = hedgehog.state[ chan_id ];
+                    if ( !state ) return console.log( 'error, there is no channel with this chan_id:', chan_id, 'available channels:', Object.keys( hedgehog.state ) );
                     var am_alice = !!state.alices_priv;
                     var privkey = am_alice ? state.alices_priv : state.bobs_priv;
                     var pmt_preimage = null;
@@ -1948,15 +1950,20 @@
             var hedgehog_client = {
                 network: "testnet4/",
                 explorer: "mempool.space",
-                privkey: null,
-                pubkey: null,
                 server: null,
                 relays: null,
+                backup_privkey: null,
+                backup_relays: [ 'wss://nostrue.com' ],
                 nostr_privkey: null,
                 two_way_comms: {},
+                checks: {},
+                num_of_checks: 0,
                 showPage: page => {
                     $( '.welcome_page' ).classList.add( "hidden" );
                     $( '.wallet_page' ).classList.add( "hidden" );
+                    $( '.loading_page' ).classList.add( "hidden" );
+                    $( '.checks_page' ).classList.add( "hidden" );
+                    $( '.check_page' ).classList.add( "hidden" );
                     $( `.${page}` ).classList.remove( "hidden" );
                 },
                 onboard: async () => {
@@ -1973,7 +1980,8 @@
                     hedgehog_client.server = server;
                     hedgehog_client.relays = relays;
                     //TODO: ensure the backup string includes nostr relays where you will store your data, so that you load that data from them when you log in later
-                    var backup_string = super_nostr.getPrivkey();
+                    var backup_privkey = super_nostr.getPrivkey();
+                    var backup_string = hedgehog_client.convertPubkeyAndRelaysToNprofile( "nbackup", backup_privkey, hedgehog_client.backup_relays );
                     var content = `
                         <p>Here is your backup string</p>
                         <p class="show_backup_string">${backup_string}</p>
@@ -2013,12 +2021,16 @@
                         }
                     }
                 },
-                login: backup_string => {
-                    hedgehog_client.privkey = backup_string;
-                    hedgehog_client.pubkey = super_nostr.getPubkey( backup_string );
+                login: async backup_string => {
+                    var [ backup_privkey, backup_relays ] = hedgehog_client.convertNEvent( backup_string );
+                    hedgehog_client.backup_privkey = backup_privkey;
+                    hedgehog_client.backup_relays = backup_relays;
+                    hedgehog_client.showPage( 'loading_page' );
+                    await hedgehog_client.downloadState();
                     hedgehog_client.showPage( 'wallet_page' );
                     hedgehog_client.nostr_privkey = super_nostr.getPrivkey();
-                    if ( url_params.server_id ) {
+                    //TODO: allow people to use more than one hedgehog server
+                    if ( url_params.server_id && !hedgehog_client.server ) {
                         var server_id = url_params.server_id;
                         var [ server, relays ] = hedgehog_client.convertNEvent( server_id );
                         hedgehog_client.server = server;
@@ -2027,13 +2039,109 @@
                     //TODO: load data from the nostr relays in your backup string so that you know what relays the server uses, which should be stored there
                     hedgehog_client.listenOnNostr();
                 },
+                downloadState: async () => {
+                    var backup_privkey = hedgehog_client.backup_privkey;
+                    var backup_pubkey = super_nostr.getPubkey( backup_privkey );
+                    var relay = hedgehog_client.backup_relays[ 0 ];
+                    var ids = null;
+                    var authors = [ backup_pubkey ];
+                    var kinds = [ 16108 ];
+                    var until = null;
+                    var since = null;
+                    var limit = 1;
+                    var alt_event = localStorage.hedgehog_client_state ? localStorage.hedgehog_client_state : "";
+                    if ( alt_event ) alt_event = JSON.parse( alt_event );
+                    var events = await super_nostr.getEvents( relay, ids, authors, kinds, until, since, limit );
+                    if ( !events.length && !alt_event ) {
+                        console.log( 'no state' );
+                        hedgehog_client.uploadStateLoop();
+                        hedgehog_client.balanceLoop();
+                        hedgehog_client.handleChecksLoop();
+                        return;
+                    }
+                    var state_event = events[ 0 ];
+                    var real_event = state_event;
+                    if ( !real_event ) real_event = alt_event;
+                    if ( alt_event && alt_event.length > JSON.stringify( real_event ).length ) real_event = JSON.parse( alt_event );
+                    real_event.content = await super_nostr.alt_decrypt( backup_privkey, backup_pubkey, real_event.content );
+                    var {
+                        network,
+                        explorer,
+                        server,
+                        relays,
+                        checks,
+                        state,
+                    } = JSON.parse( real_event.content );
+                    hedgehog.state = state;
+                    hedgehog_client.network = network;
+                    hedgehog_client.explorer = explorer;
+                    hedgehog_client.server = server;
+                    hedgehog_client.relays = relays;
+                    hedgehog_client.checks = checks;
+                    hedgehog_client.uploadStateLoop();
+                    hedgehog_client.balanceLoop();
+                    hedgehog_client.handleChecksLoop();
+                },
+                uploadStateLoop: async () => {
+                    await hedgehog_client.waitSomeTime( 3000 );
+                    var backup_privkey = hedgehog_client.backup_privkey;
+                    var backup_pubkey = super_nostr.getPubkey( backup_privkey );
+                    var { network, explorer, server, relays, checks } = hedgehog_client;
+                    var state = hedgehog.state;
+                    if ( !Object.keys( state ).length ) $( '.open_channel' ).classList.remove( "hidden" );
+                    var plaintext = JSON.stringify({ network, explorer, server, relays, checks, state });
+                    var encrypted = await super_nostr.alt_encrypt( backup_privkey, backup_pubkey, plaintext );
+                    var event = await super_nostr.prepEvent( backup_privkey, encrypted, 16108 );
+                    var socket_id = Object.keys( super_nostr.sockets )[ 0 ];
+                    if ( !socket_id ) {
+                        hedgehog_client.uploadStateLoop();
+                        return;
+                    }
+                    var socket = super_nostr.sockets[ socket_id ].socket;
+                    // super_nostr.sendEvent( event, socket );
+                    localStorage.hedgehog_client_state = JSON.stringify( event );
+                    hedgehog_client.uploadStateLoop();
+                },
+                getBalance: chan_id => {
+                    if ( !chan_id ) return [ 0, 0 ];
+                    var income = 0;
+                    var expenses = 0;
+                    hedgehog.state[ chan_id ].channel_states.forEach( ( item, index ) => {
+                        if ( item.from === "bob" && !item.added_htlc ) income = income + item.amnt_sent;
+                        if ( index && item.from === "alice" && !item.added_htlc ) expenses = expenses + item.amnt_sent;
+                    });
+                    var in_checks = 0;
+                    Object.keys( hedgehog_client.checks ).forEach( check_id => {
+                        var check = hedgehog_client.checks[ check_id ];
+                        in_checks = in_checks + check.check_amount + check.channel_fee;
+                    });
+                    return [ income - expenses, in_checks ];
+                },
+                balanceLoop: async () => {
+                    //TODO: allow more than one channel
+                    var chan_id = hedgehog_client.getChanId();
+                    if ( !chan_id ) {
+                        await hedgehog_client.waitSomeTime( 1000 );
+                        hedgehog_client.balanceLoop();
+                    }
+                    if ( Object.keys( hedgehog_client.checks ).length ) {
+                        $( '.checks_amnt_p' ).classList.remove( "hidden" );
+                    } else {
+                        $( '.checks_amnt_p' ).classList.add( "hidden" );
+                    }
+                    var [ balance_not_in_checks, balance_in_checks ] = hedgehog_client.getBalance( chan_id );
+                    $( '.balance' ).innerText = balance_not_in_checks - balance_in_checks;
+                    $( '.balance_in_checks' ).innerText = balance_in_checks;
+                    await hedgehog_client.waitSomeTime( 100 );
+                    hedgehog_client.balanceLoop();
+                },
                 openChannel: async () => {
                     hedgehog_client.makeJITChannelPartOne( 40_000 );
                 },
                 receive: async () => {
-                    var chan_id = Object.keys( hedgehog.state )[ 0 ];
+                    var chan_id = hedgehog_client.getChanId();
                     if ( !chan_id ) return alert( 'open a channel first' );
-                    var amnt = Number( prompt( `enter the amount of sats you want to receive` ) );
+                    var amnt = Number( prompt( `enter the amount of sats you want to receive, or enter a check` ) );
                     if ( !amnt ) return;
                     hedgehog_client.prepToReceiveLNPartOne( chan_id, amnt );
                 },
@@ -2161,6 +2269,7 @@
 
                     //inform the user what's up
                     showModal( `<p>Payment detected. Waiting for channel funding tx to confirm (${hedgehog.state[ chan_id ].funding_txinfo[ 0 ]})</p>` );
+                    $( '.open_channel' ).classList.add( "hidden" );
                 },
                 prepToReceiveLNPartOne: async ( chan_id, amount ) => {
                     //prepare the needed variables
@@ -2327,6 +2436,7 @@
                     var server = hedgehog_client.server;
                     var relays = hedgehog_client.relays;
                     var state = hedgehog.state[ chan_id ];
+                    var am_alice = !!state.alices_priv;
                     showModal( `<p>resolving htlc</p>` );
 
                     //send channel data to server
@@ -2365,6 +2475,8 @@
                     pending_htlcs = latest_state.pending_htlcs;
                     pending_htlcs.every( ( htlc, index ) => {
                         if ( htlc.pmthash !== pmthash ) return true;
+                        if ( am_alice && htlc.sender === "alice" ) return true;
+                        if ( !am_alice && htlc.sender === "bob" ) return true;
                         index_of_pending_htlc = index;
                         amnt_of_pending_htlc = htlc.amnt;
                     });
@@ -2473,6 +2585,7 @@
                                 var server = hedgehog_client.server;
                                 var relays = hedgehog_client.relays;
                                 var state = hedgehog.state[ chan_id ];
+                                var am_alice = !!state.alices_priv;
 
                                 //find the to-be-resolved htlc
                                 var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
@@ -2485,6 +2598,8 @@
                                 if ( !pending_htlcs.length ) return console.log( 'error, your counterparty sent you a preimage when you have no pending htlcs' );
                                 pending_htlcs.every( ( htlc, index ) => {
                                     if ( htlc.pmthash !== pmthash ) return true;
+                                    if ( am_alice && htlc.sender === "bob" ) return true;
+                                    if ( !am_alice && htlc.sender === "alice" ) return true;
                                     index_of_pending_htlc = index;
                                     amnt_of_pending_htlc = htlc.amnt;
                                 });
@@ -2567,6 +2682,13 @@
                         });
                     } catch ( e ) {return false;}
                 },
+                sendBtn: async () => {
+                    var chan_id = hedgehog_client.getChanId();
+                    if ( !chan_id ) return alert( 'open a channel first' );
+                    var invoice = prompt( `enter an LN invoice` );
+                    if ( !invoice ) return;
+                    hedgehog_client.sendViaLN( chan_id, invoice );
+                },
                 send: async ( chan_id, amnt, pmthash ) => {
                     var htlc_locktime = 2026;
                     var worked = await hedgehog.sendHtlc( chan_id, amnt, htlc_locktime, pmthash );
@@ -2605,6 +2727,7 @@
                     var server = hedgehog_client.server;
                     var relays = hedgehog_client.relays;
                     var state = hedgehog.state[ chan_id ];
+                    var am_alice = !!state.alices_priv;
 
                     //find the relevant htlc
                     var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
@@ -2615,6 +2738,8 @@
                     if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
                     pending_htlcs.every( ( htlc, index ) => {
                         if ( htlc.pmthash !== pmthash ) return true;
+                        if ( am_alice && htlc.sender === "bob" ) return true;
+                        if ( !am_alice && htlc.sender === "alice" ) return true;
                         index_of_pending_htlc = index;
                         amnt_of_pending_htlc = htlc.amnt;
                     });
@@ -2769,6 +2894,239 @@
                     var amount = Math.floor( decoded[ "millisatoshis" ] / 1000 ).toString();
                     return Number( amount );
                 },
+                convertPubkeyAndRelaysToNprofile: ( prefix, pubkey, relays ) => {
+                    var relays_str = "";
+                    relays.forEach( relay => {
+                        var relay_str = hedgehog_client.textToHex( relay );
+                        var len = ( relay_str.length / 2 ).toString( 16 );
+                        if ( len.length % 2 ) len = "0" + len;
+                        relays_str = relays_str + "01" + len + relay_str;
+                    });
+                    var hex = relays_str + "0020" + pubkey;
+                    var bytes = super_nostr.hexToBytes( hex );
+                    var nevent = bech32.bech32.encode( prefix, bech32.bech32.toWords( bytes ), 100_000 );
+                    return nevent;
+                },
+                textToHex: text => {
+                    var encoded = new TextEncoder().encode( text );
+                    return Array.from( encoded )
+                        .map( x => x.toString( 16 ).padStart( 2, "0" ) )
+                        .join( "" );
+                },
+                showChecks: () => hedgehog_client.showPage( "checks_page" ),
+                newCheck: () => {
+                    var new_check_html = `
+                        <p style="font-weight: bold;">New check</p>
+                        <p>Enter a label</p>
+                        <p><input class="new_check_label" placeholder="Money for rent"></p>
+                        <p>Enter an amount in sats</p>
+                        <p><input class="new_check_amount" type="number" min="2000" step="1" placeholder="2000"></p>
+                        <p class="channel_fee_info"><input type="checkbox" class="include_channel_fee" id="include_channel_fee"> <label for="include_channel_fee">Include channel fee</label>
+                        <p>If a channel fee is included, an extra payment of 1000 sats will be added to your check to pay for a new channel for your recipient, if necessary. The channel fee has to be a separate payment to reduce trust in the server: the channel fee goes to the server, not the recipient, so the server can steal it. But he promises not to, and in fact he promises to refund the unused portion of the channel fee.</p>
+                        <p><button class="submit_new_check">Submit</button></p>
+                    `;
+                    showModal( new_check_html );
+                    $( '.submit_new_check' ).onclick = async () => {
+                        var chan_id = hedgehog_client.getChanId();
+                        if ( !chan_id ) return alert( 'open a channel first' );
+                        var check_label = $( '.new_check_label' ).value;
+                        var check_amount = Number( $( '.new_check_amount' ).value );
+                        if ( !check_label ) return alert( 'check must be labeled, try again' );
+                        if ( String( check_amount ).includes( "," ) || String( check_amount ).includes( "." ) ) return alert( 'check amount must be a number with no commas or periods, try again' );
+                        if ( check_amount < 2000 ) return alert( 'check amount must be 2000 or greater' );
+                        var balance = hedgehog_client.getBalance( chan_id )[ 0 ] - hedgehog_client.getBalance( chan_id )[ 1 ];
+                        var sum_needed = check_amount;
+                        //TODO: instead of hard coding a channel fee of 1000 sats, use mempool data to estimate it and add a 10% buffer
+                        var channel_fee = 1000;
+                        if ( $( '.include_channel_fee' ).checked ) sum_needed = sum_needed + channel_fee;
+                        if ( sum_needed > balance ) return alert( `your balance is not high enough for this check, you need an extra ${balance - sum_needed} sats` );
+                        var check_privkey = super_nostr.getPrivkey();
+                        var check_pubkey = super_nostr.getPubkey( check_privkey );
+                        var check_relays = hedgehog_client.backup_relays;
+                        var check_id = hedgehog_client.convertPubkeyAndRelaysToNprofile( "hh_check_", check_privkey, check_relays );
+                        var check_preimage = super_nostr.getPrivkey();
+                        var check_absolute_timelock = 0;
+                        var check_encryption_privkey = super_nostr.getPrivkey();
+                        var server = hedgehog_client.server;
+                        var relays = hedgehog_client.relays;
+                        var check_encrypted_chan_id = await super_nostr.alt_encrypt( check_encryption_privkey, server, chan_id );
+                        var check_encryption_pubkey = super_nostr.getPubkey( check_encryption_privkey );
+                        var check_server_id = hedgehog_client.convertPubkeyAndRelaysToNprofile( "nprofile", server, relays );
+                        var channel_fee_data = {}
+                        var encrypted_channel_fee_data = null;
+                        if ( $( '.include_channel_fee' ).checked ) {
+                            channel_fee_data.fee_amount = channel_fee;
+                            channel_fee_data.fee_preimage = super_nostr.getPrivkey();
+                            channel_fee_data.fee_absolute_timelock = 0;
+                            encrypted_channel_fee_data = await super_nostr.alt_encrypt( check_encryption_privkey, server, JSON.stringify( channel_fee_data ) );
+                        }
+                        var data_to_put_on_nostr = JSON.stringify({
+                            check_amount,
+                            check_preimage,
+                            check_absolute_timelock,
+                            check_server_id,
+                            check_encrypted_chan_id,
+                            check_encryption_pubkey,
+                            encrypted_channel_fee_data,
+                        });
+                        var encrypted_data = await super_nostr.alt_encrypt( check_privkey, check_pubkey, data_to_put_on_nostr );
+                        var event = await super_nostr.prepEvent( check_privkey, encrypted_data, 16109 );
+                        var socket_id = Object.keys( super_nostr.sockets )[ 0 ];
+                        var socket = super_nostr.sockets[ socket_id ].socket;
+                        super_nostr.sendEvent( event, socket );
+                        var check_data = {
+                            data_to_put_on_nostr: JSON.parse( data_to_put_on_nostr ),
+                            check_amount,
+                            check_label,
+                            check_status: "ready to cash",
+                            channel_fee: $( '.include_channel_fee' ).checked ? channel_fee : 0,
+                        }
+                        //create an encrypted kind 16109 message on nostr with the following content: the htlc preimage, the amount, the blockheight of an absolute timelock (can be 0), the server_id, an encrypted channel id, and similar info a second time for a “channel fee” payment (optional)
+                        hedgehog_client.checks[ check_id ] = check_data;
+                        modalVanish();
+                        //use the check_preimage and, if necessary, the fee_preimage to create one or two pending htlcs
+                        var check_pmthash = await hedgehog.sha256( hedgehog.hexToBytes( check_preimage ) );
+                        await hedgehog_client.send( chan_id, check_amount, check_pmthash );
+                        if ( $( '.include_channel_fee' ).checked ) {
+                            var fee_pmthash = await hedgehog.sha256( hedgehog.hexToBytes( channel_fee_data.fee_preimage ) );
+                            await hedgehog_client.send( chan_id, channel_fee_data.fee_amount, fee_pmthash );
+                        }
+                    }
+                },
+                handleChecksLoop: async () => {
+                    var num_of_checks = hedgehog_client.num_of_checks;
+                    var checks = Object.keys( hedgehog_client.checks );
+                    if ( !checks.length ) {
+                        $( '.pending_checks' ).innerHTML = `[None]`;
+                        await hedgehog_client.waitSomeTime( 100 );
+                        hedgehog_client.handleChecksLoop();
+                        return;
+                    }
+                    if ( checks.length === num_of_checks ) {
+                        await hedgehog_client.waitSomeTime( 100 );
+                        hedgehog_client.handleChecksLoop();
+                        return;
+                    }
+                    hedgehog_client.num_of_checks = checks.length;
+                    $( '.pending_checks' ).innerHTML = ``;
+                    checks.forEach( check_id => {
+                        var check = hedgehog_client.checks[ check_id ];
+                        var url = `${window.location.protocol}//${window.location.hostname}/${window.location.pathname}#check=${check_id}`;
+                        var qr = hedgehog_client.createQR( url.toUpperCase() );
+                        var check_html = `
+                            <div>Label: <span class="check_label">${check.check_label}</span></div>
+                            <div>Amount: <span class="check_amount">${check.channel_fee ? String( check.check_amount ) + "&nbsp;+&nbsp;" + String( check.channel_fee ) : check.check_amount}</span></div>
+                            <div>Status: <span class="check_status">${check.check_status}</span></div>
+                            <div><button class="check_btn void_this_check">Void this check</button></div>
+                            <div><button class="check_btn view_check_qr">View qr code</button></div>
+                            <div><button class="check_btn view_payment_string">View payment string</button></div>
+                            <div class="check_qr_code hidden"></div>
+                            <div class="check_payment_string hidden">${url}</div>
+                        `;
+                        var div = document.createElement( "div" );
+                        div.classList.add( "check" );
+                        div.classList.add( check_id );
+                        div.innerHTML = check_html;
+                        div.getElementsByClassName( "check_qr_code" )[ 0 ].append( qr );
+                        div.getElementsByClassName( "view_check_qr" )[ 0 ].onclick = () => {
+                            var item = $( `.${check_id} .check_qr_code` );
+                            if ( item.classList.contains( "hidden" ) ) item.classList.remove( "hidden" );
+                            else item.classList.add( "hidden" );
+                        }
+                        div.getElementsByClassName( "view_payment_string" )[ 0 ].onclick = () => {
+                            var item = $( `.${check_id} .check_payment_string` );
+                            if ( item.classList.contains( "hidden" ) ) item.classList.remove( "hidden" );
+                            else item.classList.add( "hidden" );
+                        }
+                        $( '.pending_checks' ).append( div );
+                    });
+                    await hedgehog_client.waitSomeTime( 100 );
+                    hedgehog_client.handleChecksLoop();
+                },
+                getChanId: () => Object.keys( hedgehog.state )[ 0 ],
+                createQR: content => {
+                    var dataUriPngImage = document.createElement( "img" ),
+                    s = QRCode.generatePNG( content, {
+                        ecclevel: "M",
+                        format: "html",
+                        fillcolor: "#FFFFFF",
+                        textcolor: "#000000",
+                        margin: 4,
+                        modulesize: 8,
+                    });
+                    dataUriPngImage.src = s;
+                    dataUriPngImage.className = "qr_code";
+                    dataUriPngImage.style.width = "100%";
+                    return dataUriPngImage;
+                },
+                checkPage: async () => {
+                    //show check page
+                    hedgehog_client.showPage( "check_page" );
+
+                    //prepare requisite variables
+                    var check_id = url_params.check;
+                    var [ check_privkey, check_relays ] = hedgehog_client.convertNEvent( check_id );
+                    var privkey = check_privkey;
+                    var check_pubkey = super_nostr.getPubkey( check_privkey );
+                    var relay = check_relays[ 0 ];
+                    var ids = null;
+                    var authors = [ check_pubkey ];
+                    var kinds = [ 16109 ];
+                    var until = null;
+                    var since = null;
+                    var limit = 1;
+                    var events = await super_nostr.getEvents( relay, ids, authors, kinds, until, since, limit );
+                    if ( !events.length ) $( '.check_info' ).innerHTML = `Sorry, someone sent you an uncashable check.`;
+                    var check = events[ 0 ];
+                    check.content = await super_nostr.alt_decrypt( check_privkey, check_pubkey, check.content );
+                    var json = JSON.parse( check.content );
+                    console.log( json );
+                    var { check_amount: check_amnt, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id: encrypted_chan_id, check_encryption_pubkey: encryption_pubkey, encrypted_channel_fee_data } = json;
+                    var check_pmthash = await hedgehog.sha256( hedgehog.hexToBytes( check_preimage ) );
+
+                    //listen on nostr
+                    var nostr_privkey = check_privkey;
+                    var nostr_pubkey = check_pubkey;
+                    var check_server_id = json.check_server_id;
+                    var [ server, relays ] = hedgehog_client.convertNEvent( check_server_id );
+                    var listenFunction = async socket => {
+                        var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
+                        var filter  = {}
+                        filter.authors = [ server ];
+                        filter.kinds = [ 4 ];
+                        filter[ "#p" ] = [ nostr_pubkey ];
+                        filter.since = Math.floor( Date.now() / 1000 );
+                        var subscription = [ "REQ", subId, filter ];
+                        socket.send( JSON.stringify( subscription ) );
+                    }
+                    var handleFunction = async message => {
+                        var [ type, subId, event ] = JSON.parse( message.data );
+                        if ( !event || event === true ) return;
+                        try {
+                            event.content = await super_nostr.alt_decrypt( nostr_privkey, event.pubkey, event.content );
+                            var json = JSON.parse( event.content );
+                            if ( json[ "msg_type" ] === "get_check_status_reply" ) {
+                                if ( json.msg_value === "irredeemable" ) $( '.check_info' ).innerHTML = `Sorry, someone sent you an uncashable check.`;
+                                if ( json.msg_value === "redeemable" ) $( '.check_info' ).innerHTML = `The check is worth ${check_amnt} sats. How do you want to cash it?`;
+                            }
+                        }
+                        catch ( e ) {
+                            console.log( e );
+                        }
+                    }
+                    await super_nostr.newPermanentConnection( relays[ 0 ], listenFunction, handleFunction );
+
+                    //ensure check is redeemable
+                    var nostr_relays = relays;
+                    var counterparty_pubkey = server;
+                    var msg_for_counterparty = JSON.stringify({
+                        msg_type: "get_check_status",
+                        msg_value: { encrypted_chan_id, check_pmthash, check_amnt, encryption_pubkey, check_absolute_timelock },
+                    });
+                    var emsg = await super_nostr.alt_encrypt( privkey, counterparty_pubkey, msg_for_counterparty );
+                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterparty_pubkey ] ] );
+                    super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                }
             }
         </script>
         <style>
@@ -2813,6 +3171,36 @@
                 padding: 1rem;
                 background-color: tan;
                 font-family: mono;
+            }
+            .check {
+                background-color: lightgreen;
+                padding: 1rem;
+                border: 1px solid green;
+            }
+            .unfunded {
+                background-color: lightblue;
+            }
+            .check_btn, .check_qr_code, .check_payment_string {
+                margin-top: 1rem;
+            }
+            .check_qr_code {
+                max-width: 15rem;
+            }
+            .check_payment_string {
+                background-color: tan;
+                padding: 1rem;
+            }
+            .channel_fee_info {
+                display: flex;
+                justify-content: center;
+                align-items: center;
+            }
+            .include_channel_fee {
+                width: .7rem;
+                margin-right: 0.5rem;
+            }
+            .checks_amnt_p, .checks_amnt_p * {
+                font-size: .9rem;
             }
             @media screen and (max-width: 600px) {
             }
@@ -2884,10 +3272,25 @@
         <div class="wallet_page hidden">
             <h1>Your wallet</h1>
             <p>Balance: <span class="balance">0</span> sats</p>
-            <p><button class="open_channel">Open channel</button></p>
+            <p class="checks_amnt_p hidden">In checks: <span class="balance_in_checks">0</span> sats</p>
+            <p><button class="open_channel hidden">Open channel</button></p>
             <p><button class="receive">Receive</button></p>
             <p><button class="send">Send</button></p>
+            <p><button class="checks">Checks</button></p>
             <p><button class="exit">Exit</button></p>
+        </div>
+        <div class="checks_page hidden">
+            <h1>Checks</h1>
+            <p><button class="new_check">New check</button> <button class="back_btn">Back</button></p>
+            <h2>Pending checks</h2>
+            <div class="pending_checks"></div>
+        </div>
+        <div class="check_page hidden">
+            <h1>Time to redeem your check</h1>
+            <div class="check_info">loading check info...</div>
+        </div>
+        <div class="loading_page hidden">
+            <p>Loading...</p>
         </div>
         <script>
             hedgehog_client.setUpComms();
@@ -2904,9 +3307,13 @@
             $( '.onboard' ).onclick = hedgehog_client.onboard;
             $( '.open_channel' ).onclick = hedgehog_client.openChannel;
             $( '.receive' ).onclick = hedgehog_client.receive;
-            $( '.send' ).onclick = hedgehog_client.send;
+            $( '.send' ).onclick = hedgehog_client.sendBtn;
+            $( '.checks' ).onclick = hedgehog_client.showChecks;
+            $( '.new_check' ).onclick = hedgehog_client.newCheck;
+            $$( '.back_btn' ).forEach( item => item.onclick = () => hedgehog_client.showPage( "wallet_page" ) );
             if ( url_params.onboard ) hedgehog_client.onboard();
             if ( url_params.backup_string ) hedgehog_client.login( url_params.backup_string );
+            if ( url_params.check ) hedgehog_client.checkPage();
         </script>
         <div class="black-bg hidden" onclick="modalVanish();"></div>
         <div class="modal hidden"></div>
