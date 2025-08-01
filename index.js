@@ -9,7 +9,7 @@ var inbound_capacity_fee_type = 'absolute'; //can be 'absolute' or change to 'pe
 
 // DO NOT MODIFY STUFF BELOW THIS LINE
 
-//npm i noble-secp256k1 ws crypto bech32 @cmdcode/tapscript base58check
+//npm i noble-secp256k1 @cmdcode/tapscript ws base58check crypto bech32 bolt11
 
 var crypto = require( 'crypto' );
 globalThis.crypto = crypto;
@@ -18,6 +18,7 @@ var tapscript = require( '@cmdcode/tapscript' );
 var WebSocket = require( 'ws' ).WebSocket;
 var base58 = require( 'base58check' );
 var bech32 = require( 'bech32' );
+var bolt11 = require( 'bolt11' );
 var fs = require( 'fs' );
 
 if ( fs.existsSync( "db.txt" ) ) {
@@ -1064,7 +1065,12 @@ var hedgehog = {
         var [ _, _, _, _, _, _, _, _, senders_tx1, senders_tx2 ] = txs;
         var senders_pub = state.alices_pub;
         if ( !am_alice ) var senders_pub = state.bobs_pub;
-        senders_tx2.vout[ 1 ].scriptPubKey = [ 1, senders_pub ];
+        if ( senders_tx2.vout.length < 3 ) {
+            senders_tx2.vout[ 1 ].scriptPubKey = [ 1, senders_pub ];
+        } else {
+            senders_tx2.vout[ 1 ].scriptPubKey = [ 1, state.alices_pub ];
+            senders_tx2.vout[ 2 ].scriptPubKey = [ 1, state.bobs_pub ];
+        }
         var senders_tx2_sighash = tapscript.Signer.taproot.hash( senders_tx2, 0, {extension: midstate_tree_override[ 0 ] }).hex;
         var sig_on_senders_tx2_is_valid = await nobleSecp256k1.schnorr.verify( sig_on_senders_tx2, senders_tx2_sighash, recipients_pub );
 
@@ -2343,6 +2349,84 @@ var hedgehog_server = {
                     hedgehog_server.two_way_comms[ msg_id ] = json.msg_value.data_for_server;
                     return;
                 }
+                if ( json.msg_type === "pay_ln_invoice_for_user" ) {
+                    //prepare requisite variables
+                    var { encrypted_chan_id, invoice, encryption_pubkey } = json.msg_value;
+                    var privkey = nostr_privkey;
+                    var user_pubkey = event.pubkey;
+                    var chan_id = await super_nostr.alt_decrypt( privkey, encryption_pubkey, encrypted_chan_id );
+                    chan_id = "b_" + chan_id.substring( 2 );
+                    var state = hedgehog.state[ chan_id ];
+                    var am_alice = !!state.alices_priv;
+
+                    //find the pending htlc
+                    var pmthash = hedgehog_server.getInvoicePmthash( invoice );
+                    var index_of_pending_htlc = -1;
+                    var amnt_of_pending_htlc = null;
+                    var pending_htlcs = [];
+                    var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                    if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+                    //TODO: send back an error message
+                    if ( !pending_htlcs.length ) return console.log( 'aborting because an unknown person wants to resolve an htlc that does not exist' );
+                    pending_htlcs.every( ( htlc, index ) => {
+                        if ( htlc.pmthash !== pmthash ) return true;
+                        index_of_pending_htlc = index;
+                        amnt_of_pending_htlc = htlc.amnt;
+                    });
+                    //TODO: send back an error message
+                    if ( index_of_pending_htlc < 0 ) return console.log( 'aborting because an unknown person wants to resolve an htlc that does not exist' );
+                    var pending_htlc = pending_htlcs[ index_of_pending_htlc ];
+                    //TODO: send back an error message
+                    if ( pending_htlc.sender === "bob" && !am_alice || pending_htlc.sender === "alice" && am_alice ) return console.log( 'aborting because an unknown person wants to resolve an htlc that does not pay you' );
+
+                    //ensure the invoice is worth a value equal to or less than the htlc
+                    var invoice_amnt = hedgehog_server.getInvoiceAmount( invoice );
+                    //TODO: send back an error message
+                    if ( invoice_amnt > pending_htlc.amnt ) return console.log( 'aborting because an unknown person wants to resolve an htlc that does not pay you' );
+
+                    //pay the invoice
+                    //TODO: set a max outgoing fee and ensure you recoup it when settling the pending htlc
+                    var error = null;
+                    var method = "lnpay";
+                    var params = {
+                        invoice,
+                        password: electrum_alt_password,
+                    }
+                    queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+
+                    //check its status on loop
+                    var loop = async () => {
+                        await super_nostr.waitSomeSeconds( 1 );
+                        var error = null;
+                        var method = "get_invoice";
+                        var params = {
+                            invoice_id: pmthash,
+                        }
+                        var status = null;
+                        var status_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+                        if ( status_data.error && status_data.error.message ) error = status_data.error.message;
+                        else status = status_data.result;
+                        if ( status && status.status_str === "Paid" ) return status.preimage;
+                        if ( error ) return `error: ${error}`;
+                        return loop();
+                    }
+                    var status = await loop();
+                    if ( status.startsWith( "error" ) ) {
+                        console.log( 'error:', error );
+                        return;
+                    }
+
+                    var preimage = status;
+                    pending_htlcs[ index_of_pending_htlc ].pmt_preimage = preimage;
+                    //TODO: return success message to whoever requested that this invoice be paid
+                    //TODO: do not ask your counterparty to resolve the htlc unless they are online
+                    //and recall that they might not be the person who asked you to pay this --
+                    //the person desiring payment may be a third party using a hedgehog-to-LN bridge
+
+                    hedgehog_server.askCounterpartyToResolveHtlc( chan_id, preimage );
+
+                    return;
+                }
                 if ( json.msg_type === "channel_request" ) {
                     //find out how much money to put in this channel
                     //i.e. double the amount requested, or a minimum
@@ -2963,6 +3047,29 @@ var hedgehog_server = {
         }
     },
     waitSomeTime: num => new Promise( resolve => setTimeout( resolve, num ) ),
+    getInvoicePmthash: invoice => {
+        var decoded = bolt11.decode( invoice );
+        var i; for ( i=0; i<decoded[ "tags" ].length; i++ ) {
+            if ( decoded[ "tags" ][ i ][ "tagName" ] === "payment_hash" ) return decoded[ "tags" ][ i ][ "data" ].toString();
+        }
+    },
+    getInvoiceAmount: invoice => {
+        var decoded = bolt11.decode( invoice );
+        var amount = Math.floor( decoded[ "millisatoshis" ] / 1000 ).toString();
+        return Number( amount );
+    },
+    askCounterpartyToResolveHtlc: async ( chan_id, preimage ) => {
+        var counterparty_pubkey = hedgehog_server.comms_keys[ chan_id ];
+        if ( !counterparty_pubkey ) return console.log( 'cannot ask that counterparty -- you have no nostr pubkey on file for them' );
+        var privkey = nostr_privkey;
+        var msg_for_counterparty = JSON.stringify({
+            msg_type: "htlc_to_server_part_zero",
+            msg_value: {preimage, chan_id},
+        });
+        var emsg = await super_nostr.alt_encrypt( privkey, counterparty_pubkey, msg_for_counterparty );
+        var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterparty_pubkey ] ] );
+        super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+    },
 }
 
 if ( db.nostr_privkey ) {
