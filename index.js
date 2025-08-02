@@ -2548,23 +2548,70 @@ var hedgehog_server = {
                     var hex_priv = hedgehog_server.getHexFromWif( wif );
                     var encrypted_hex_priv = await super_nostr.alt_encrypt( nostr_privkey, nostr_pubkey, hex_priv );
 
-                    //prepare to make a "fee invoice" for the cost of the channel
-                    var cost_of_channel = inbound_capacity_fee_type === "absolute" ? Number( inbound_capacity_fee ) : Number( ( Number( channel_capacity ) * Number( ( Number( inbound_capacity_fee ) / 100 ).toFixed( 2 ) ) ).toFixed( 2 ) );
-                    var cost_of_fee_invoice = hedgehog_server.satsToBitcoin( cost_of_channel );
-                    cost_of_fee_invoice = Number( cost_of_fee_invoice );
-                    var fee_invoice_preimage = super_nostr.getPrivkey();
-                    var fee_invoice_pmthash = await super_nostr.sha256( super_nostr.hexToBytes( fee_invoice_preimage ) );
-                    var encrypted_fee_preimage = await super_nostr.alt_encrypt( nostr_privkey, nostr_pubkey, fee_invoice_preimage );
+                    //check if we need a fee invoice
+                    var need_fee_invoice = true;
+                    if ( json.msg_value.hasOwnProperty( "fee_payment" ) ) {
+                        //extract fee payment info
+                        var fee_payment_info = json.msg_value.fee_payment;
+                        var encrypted_chan_id = fee_payment_info.encrypted_chan_id;
+                        var encryption_pubkey = fee_payment_info.encryption_pubkey;
+                        var fee_chan_id = await super_nostr.alt_decrypt( nostr_privkey, encryption_pubkey, encrypted_chan_id );
+                        var encrypted_channel_fee_data = fee_payment_info.encrypted_channel_fee_data;
+                        var decrypted_channel_fee_data = await super_nostr.alt_decrypt( nostr_privkey, encryption_pubkey, encrypted_channel_fee_data );
+                        var fee_payment_json = JSON.parse( decrypted_channel_fee_data );
+                        var { fee_amount, fee_preimage, fee_absolute_timelock } = fee_payment_json;
 
-                    //make the fee invoice
-                    var method = 'add_hold_invoice';
-                    var params = {payment_hash: fee_invoice_pmthash, amount: cost_of_fee_invoice, memo: ""};
-                    var fee_invoice_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+                        //check if the fee-paying htlc exists
+                        var chan_id = "b_" + fee_chan_id.substring( 2 );
+                        if ( hedgehog.state.hasOwnProperty( chan_id ) ) {
+                            var state = hedgehog.state[ chan_id ];
+                            var am_alice = !!state.alices_priv;
+
+                            //find the to-be-resolved htlc
+                            var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( fee_preimage ) );
+                            var index_of_pending_htlc = -1;
+                            var amnt_of_pending_htlc = null;
+                            var pending_htlcs = [];
+                            var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                            if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+                            //TODO: force close if the error below is thrown
+                            if ( !pending_htlcs.length ) return console.log( 'error, your counterparty sent you a preimage when you have no pending htlcs' );
+                            pending_htlcs.every( ( htlc, index ) => {
+                                if ( htlc.pmthash !== pmthash ) return true;
+                                if ( am_alice && htlc.sender === "alice" ) return true;
+                                if ( !am_alice && htlc.sender === "bob" ) return true;
+                                index_of_pending_htlc = index;
+                                amnt_of_pending_htlc = htlc.amnt;
+                            });
+                            if ( index_of_pending_htlc >= 0 ) {
+                                //TODO: mark the fee payment as ready for settlement next time the sender gets online
+                                pending_htlcs[ index_of_pending_htlc ].pmt_preimage = fee_preimage;
+                                need_fee_invoice = false;
+                                //TODO: do not ask that counterparty to resolve the htlc unless they are online
+                                hedgehog_server.askCounterpartyToResolveHtlc( fee_chan_id, fee_preimage );
+                            }
+                        }
+                    }
+
                     var fee_invoice = null;
-                    if ( fee_invoice_data.error && fee_invoice_data.error.message ) error = fee_invoice_data.error.message;
-                    else fee_invoice = fee_invoice_data.result.invoice;
+                    if ( need_fee_invoice ) {
+                        //prepare to make a "fee invoice" for the cost of the channel
+                        var cost_of_channel = inbound_capacity_fee_type === "absolute" ? Number( inbound_capacity_fee ) : Number( ( Number( channel_capacity ) * Number( ( Number( inbound_capacity_fee ) / 100 ).toFixed( 2 ) ) ).toFixed( 2 ) );
+                        var cost_of_fee_invoice = hedgehog_server.satsToBitcoin( cost_of_channel );
+                        cost_of_fee_invoice = Number( cost_of_fee_invoice );
+                        var fee_invoice_preimage = super_nostr.getPrivkey();
+                        var fee_invoice_pmthash = await super_nostr.sha256( super_nostr.hexToBytes( fee_invoice_preimage ) );
+                        var encrypted_fee_preimage = await super_nostr.alt_encrypt( nostr_privkey, nostr_pubkey, fee_invoice_preimage );
 
-                    //TODO: if there is an error, return it
+                        //make the fee invoice
+                        var method = 'add_hold_invoice';
+                        var params = {payment_hash: fee_invoice_pmthash, amount: cost_of_fee_invoice, memo: ""};
+                        var fee_invoice_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+                        if ( fee_invoice_data.error && fee_invoice_data.error.message ) error = fee_invoice_data.error.message;
+                        else fee_invoice = fee_invoice_data.result.invoice;
+
+                        //TODO: if there is an error, return it                        
+                    }
 
                     //prepare a channel keypair
                     var channel_privkey = hedgehog.getPrivkey();
@@ -2583,17 +2630,21 @@ var hedgehog_server = {
                     //TODO: if there is an error, return it
 
                     //save the data for later use
-                    hedgehog_server.data_for_channel_opens[ event.pubkey ] = {
-                        fee_invoice: fee_invoice || error,
+                    var data_to_save = {
                         utxos: utxos_ill_use || error,
                         channel_pubkey_and_hash: {pubkey: channel_pubkey, hash: channel_hash},
                         fee: txfee,
                         change_address: change_address || error,
                         channel_capacity,
-                        fee_invoice_pmthash,
                         encrypted_hex_priv,
-                        encrypted_fee_preimage,
+                        need_fee_invoice,
                     }
+                    if ( need_fee_invoice ) {
+                        data_to_save.fee_invoice = fee_invoice;
+                        data_to_save.fee_invoice_pmthash = fee_invoice_pmthash;
+                        data_to_save.encrypted_fee_preimage = encrypted_fee_preimage;
+                    }
+                    hedgehog_server.data_for_channel_opens[ event.pubkey ] = data_to_save;
 
                     //send the data to the user
                     var message_for_user = JSON.stringify({
@@ -2613,6 +2664,8 @@ var hedgehog_server = {
                     var channel_is_valid = await hedgehog.openChannel( null, null, json.msg_value );
                     if ( !channel_is_valid ) return;
                     var chan_id = "b_" + json.msg_value.chan_id.substring( 2 );
+                    var user_pubkey = event.pubkey;
+                    hedgehog_server.comms_keys[ chan_id ] = user_pubkey;
 
                     //get data from previous part
                     if ( !hedgehog_server.data_for_channel_opens.hasOwnProperty( event.pubkey ) ) return;
@@ -2620,9 +2673,15 @@ var hedgehog_server = {
                     var channel_capacity = prev_data.channel_capacity;
                     var txfee = prev_data.fee;
                     var change_address = prev_data.change_address;
-                    var fee_invoice_pmthash = prev_data.fee_invoice_pmthash;
-                    var encrypted_fee_preimage = prev_data.encrypted_fee_preimage;
-                    var fee_invoice_preimage = await super_nostr.alt_decrypt( nostr_privkey, nostr_pubkey, encrypted_fee_preimage )
+                    var need_fee_invoice = prev_data.need_fee_invoice;
+                    var fee_invoice_pmthash = null;
+                    var encrypted_fee_preimage = null;
+                    var fee_invoice_preimage = null;
+                    if ( need_fee_invoice ) {
+                        fee_invoice_pmthash = prev_data.fee_invoice_pmthash;
+                        encrypted_fee_preimage = prev_data.encrypted_fee_preimage;
+                        fee_invoice_preimage = await super_nostr.alt_decrypt( nostr_privkey, nostr_pubkey, encrypted_fee_preimage )
+                    }
                     var sum_of_utxos = 0;
                     prev_data.utxos.forEach( utxo => sum_of_utxos = sum_of_utxos + utxo.amnt );
                     var channel_scripts = hedgehog.getChannelScripts( chan_id );
@@ -2652,36 +2711,38 @@ var hedgehog_server = {
                     if ( funding_txid !== hedgehog.state[ chan_id ].funding_txinfo[ 0 ] ) return;
                     if ( hedgehog.state[ chan_id ].funding_txinfo[ 1 ] !== 0 ) return;
 
-                    //wait til fee invoice is pending
-                    var loop = async () => {
-                        var error = null;
-                        var method = "check_hold_invoice";
-                        var params = {
-                            payment_hash: fee_invoice_pmthash,
+                    if ( need_fee_invoice ) {
+                        //wait til fee invoice is pending
+                        var loop = async () => {
+                            var error = null;
+                            var method = "check_hold_invoice";
+                            var params = {
+                                payment_hash: fee_invoice_pmthash,
+                            }
+                            var fee_invoice_is_paid = null;
+                            var fee_invoice_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+                            if ( fee_invoice_data.error && fee_invoice_data.error.message ) error = fee_invoice_data.error.message;
+                            else fee_invoice_is_paid = fee_invoice_data.result.status === 'paid';
+
+                            //TODO: if there is an error, return it
+
+                            if ( fee_invoice_is_paid ) return;
+                            await super_nostr.waitSomeSeconds( 1 );
+                            return loop();
                         }
-                        var fee_invoice_is_paid = null;
-                        var fee_invoice_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
-                        if ( fee_invoice_data.error && fee_invoice_data.error.message ) error = fee_invoice_data.error.message;
-                        else fee_invoice_is_paid = fee_invoice_data.result.status === 'paid';
-
-                        //TODO: if there is an error, return it
-
-                        if ( fee_invoice_is_paid ) return;
-                        await super_nostr.waitSomeSeconds( 1 );
-                        return loop();
+                        var fee_invoice_is_paid = await loop();
+                        var message_for_user = JSON.stringify({
+                            msg_type: "channel_init_reply",
+                            msg_value: 'fee invoice is paid',
+                        });
+                        console.log( 'replying:', message_for_user );
+                        var privkey = nostr_privkey;
+                        var pubkey = nostr_pubkey;
+                        var user_pubkey = event.pubkey;
+                        var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
+                        var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", event.pubkey ] ] );
+                        super_nostr.sendEvent( event, nostr_relays[ 0 ] );
                     }
-                    var fee_invoice_is_paid = await loop();
-                    var message_for_user = JSON.stringify({
-                        msg_type: "channel_init_reply",
-                        msg_value: 'fee invoice is paid',
-                    });
-                    console.log( 'replying:', message_for_user );
-                    var privkey = nostr_privkey;
-                    var pubkey = nostr_pubkey;
-                    var user_pubkey = event.pubkey;
-                    var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
-                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", event.pubkey ] ] );
-                    super_nostr.sendEvent( event, nostr_relays[ 0 ] );
 
                     //broadcast the tx
                     //TODO: actually broadcast it
