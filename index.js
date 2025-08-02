@@ -1129,6 +1129,7 @@ var hedgehog = {
             s_recovery_p2_revhash,
             recipients_rev_preimages: null,
             recipients_revhashes,
+            htlc_locktime,
             amnt,
             sender: am_alice ? "alice" : "bob",
             txid_to_check: tapscript.Tx.util.getTxid( senders_version_of_tx1 ),
@@ -1328,6 +1329,7 @@ var hedgehog = {
         //get data from previous part of process
         var data_from_part_two = state.data_for_preparing_htlcs[ pmthash ];
         var amnt = data_from_part_two[ 1 ].part_twos_data_from_sender.amnt;
+        var htlc_locktime = data_from_part_two[ 1 ].part_twos_data_from_sender.htlc_locktime;
         var recipients_new_balance = data_from_part_two[ 1 ].recipients_new_balance;
         var recipients_inital_htlc_scripts = data_from_part_two[ 1 ].recipients_inital_htlc_scripts;
         var recipients_rev_preimages = data_from_part_two[ 1 ].recipients_rev_preimages;
@@ -1371,6 +1373,7 @@ var hedgehog = {
             s_recovery_p2_revhash,
             recipients_rev_preimages,
             recipients_revhashes,
+            htlc_locktime,
             amnt,
             sender: am_alice ? "bob" : "alice",
             txid_to_check: tapscript.Tx.util.getTxid( senders_version_of_tx1 ),
@@ -2382,6 +2385,7 @@ var hedgehog_server = {
 
                         //check timelock info
                         //TODO: allow absolute timelocks other than 0
+                        //TODO: also compare it with the one in the actual htlc
                         if ( check_absolute_timelock !== 0 ) error = "irredeemable";
 
                         //ensure amount matches
@@ -2754,6 +2758,66 @@ var hedgehog_server = {
                     queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
                     return;
                 }
+                if ( json.msg_type === "request_hh_pmt_to_user" ) {
+                    //prepare the needed variables
+                    var { chan_id, check_amount, check_pmthash, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey } = json.msg_value;
+                    var privkey = nostr_privkey;
+                    var pubkey = nostr_pubkey;
+                    var user_pubkey = event.pubkey;
+                    var chan_id = "b_" + json.msg_value.chan_id.substring( 2 );
+
+                    //ensure there is a corresponding inbound htlc that pays you
+                    var inbound_chan_id = await super_nostr.alt_decrypt( privkey, check_encryption_pubkey, check_encrypted_chan_id );
+                    inbound_chan_id = "b_" + inbound_chan_id.substring( 2 );
+                    var error = null;
+                    if ( !hedgehog.state.hasOwnProperty( chan_id ) ) return;
+
+                    if ( !hedgehog.state.hasOwnProperty( inbound_chan_id ) ) return;
+                    var state = hedgehog.state[ inbound_chan_id ];
+                    var am_alice = !!state.alices_priv;
+
+                    //find relevant pending htlc
+                    var pmthash = check_pmthash;
+                    var index_of_pending_htlc = -1;
+                    var pending_htlcs = [];
+                    var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                    if ( latest_state && latest_state.hasOwnProperty( "pending_htlcs" ) ) pending_htlcs = latest_state.pending_htlcs;
+                    if ( !pending_htlcs.length ) return;
+                    pending_htlcs.every( ( htlc, index ) => {
+                        if ( htlc.pmthash !== pmthash ) return true;
+                        if ( htlc.sender !== "alice" ) return true;
+                        index_of_pending_htlc = index;
+                    });
+                    if ( index_of_pending_htlc < 0 ) return;
+
+                    //check absolute timelock info
+                    //TODO: allow absolute timelocks other than 0
+                    //TODO: also compare it with the one in the actual htlc
+                    if ( check_absolute_timelock !== 0 ) return;
+
+                    //check relative timelock info
+                    var pending_htlc = pending_htlcs[ index_of_pending_htlc ];
+                    if ( !pending_htlc.htlc_locktime || pending_htlc.htlc_locktime < 2026 ) return;
+
+                    //ensure amount matches
+                    if ( pending_htlc.amnt !== check_amount ) return;
+
+                    //inside the hedgehog channel of the person who made the request, send an htlc with these properties: it is worth the same amount as the check; it is locked to the same payment hash as the check; and it has a cltv below the check's
+                    var htlc_locktime = 20;
+                    //add a buffer, because if you force close exactly 20 blocks before your inbound payment expires, you risk a race condition, as the first moment you can recover your money from your outbound payment is also the moment they get their money back, so if they sweep your payment with the preimage at that moment, and you grab the preimage from the blockchain (or mempool) and try to settle your inbound payment with it, in that same block they get to try to try to recover their money via the absolute timelock path, and then miners pick who actually gets the money, because that's a race condition
+                    var htlc_buffer = 10;
+                    //TODO: handle any errors returned by the fetch command below
+                    var bh_data = await fetch( `https://${hedgehog_server.explorer}/testnet4/api/blocks/tip/height` );
+                    var current_blockheight = await bh_data.text();
+                    var current_blockheight = Number( current_blockheight );
+                    var block_when_i_must_force_close = ( ( current_blockheight + min_cltv ) - htlc_locktime ) - htlc_buffer;
+                    console.log( 'current_blockheight:', current_blockheight, 'block_when_i_must_force_close:', block_when_i_must_force_close );
+                    var htlc_pmthash = pmthash;
+                    hedgehog_server.comms_keys[ chan_id ] = user_pubkey;
+                    var success_pmthash = await hedgehog.sendHtlc( chan_id, check_amount, htlc_locktime, htlc_pmthash, block_when_i_must_force_close );
+                    if ( success_pmthash !== htlc_pmthash ) return `error: ${success_pmthash}`;
+                    console.log( 'htlc is sent' );
+                }
                 if ( json.msg_type === "request_ln_pmt_to_user" ) {
                     //prepare the needed variables
                     var privkey = nostr_privkey;
@@ -2800,6 +2864,7 @@ var hedgehog_server = {
                         }
                         var ln_invoice_is_paid = null;
                         var ln_invoice_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+                        //TODO: ensure the amount received is equal to or greater than the amount requested
                         if ( ln_invoice_data.error && ln_invoice_data.error.message ) error = ln_invoice_data.error.message;
                         else ln_invoice_is_paid = ln_invoice_data.result.status === 'paid';
 
