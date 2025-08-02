@@ -1966,16 +1966,17 @@
                     $( '.check_page' ).classList.add( "hidden" );
                     $( `.${page}` ).classList.remove( "hidden" );
                 },
-                onboard: async () => {
-                    if ( !url_params.hasOwnProperty( "server_id" ) ) {
+                onboard: async ( server_id, check_hex ) => {
+                    if ( !server_id && !url_params.hasOwnProperty( "server_id" ) ) {
                         var server_id = prompt( `enter a server id. Don't know one? Ask bitcoiners to recommend you a good hedgehog server and get its server id from them.` );
                         var url = window.location.protocol + "//" + window.location.hostname + window.location.pathname + `#server_id=${server_id}#onboard=true`;
                         window.location.href = url;
                         window.location.reload();
                         return;
-                    } else {
+                    } else if ( url_params.hasOwnProperty( "server_id" ) ) {
                         var server_id = url_params.server_id;
                     }
+                    url_params.server_id = server_id;
                     var [ server, relays ] = hedgehog_client.convertNEvent( server_id );
                     hedgehog_client.server = server;
                     hedgehog_client.relays = relays;
@@ -2015,13 +2016,14 @@
                                 window.location.reload();
                                 return;
                             } else {
-                                hedgehog_client.login( backup_string );
+                                if ( check_hex ) hedgehog_client.login( backup_string, check_hex );
+                                else hedgehog_client.login( backup_string );
                                 modalVanish();
                             }
                         }
                     }
                 },
-                login: async backup_string => {
+                login: async ( backup_string, check_hex ) => {
                     var [ backup_privkey, backup_relays ] = hedgehog_client.convertNEvent( backup_string );
                     hedgehog_client.backup_privkey = backup_privkey;
                     hedgehog_client.backup_relays = backup_relays;
@@ -2037,7 +2039,14 @@
                         hedgehog_client.relays = relays;
                     }
                     //TODO: load data from the nostr relays in your backup string so that you know what relays the server uses, which should be stored there
-                    hedgehog_client.listenOnNostr();
+                    await hedgehog_client.listenOnNostr();
+                    if ( check_hex ) {
+                        url_params.check_hex = check_hex;
+                        var check_data = JSON.parse( hedgehog_client.hexToText( check_hex ) );
+                        var fee_payment = {encrypted_channel_fee_data: check_data.encrypted_channel_fee_data, encryption_pubkey: check_data.check_encryption_pubkey, encrypted_chan_id: check_data.check_encrypted_chan_id};
+                        hedgehog_client.makeJITChannelPartOne( 40_000, fee_payment );
+                        return;
+                    }
                 },
                 downloadState: async () => {
                     var backup_privkey = hedgehog_client.backup_privkey;
@@ -2145,11 +2154,12 @@
                     if ( !amnt ) return;
                     hedgehog_client.prepToReceiveLNPartOne( chan_id, amnt );
                 },
-                makeJITChannelPartOne: async amount => {
+                makeJITChannelPartOne: async ( amount, fee_payment ) => {
                     var msg_for_server = JSON.stringify({
                         msg_type: "channel_request",
                         msg_value: {
                             amount,
+                            fee_payment,
                         }
                     });
                     var privkey = hedgehog_client.nostr_privkey;
@@ -2206,14 +2216,17 @@
                     } catch ( e ) {each_utxo_is_valid = false;}
 
                     try {
-                        //validate the invoice
-                        var fee_invoice = json.msg_value.fee_invoice;
-                        //TODO: uncomment the line below
-                        // if ( !fee_invoice.startsWith( "ln" ) ) return showModal( 'aborting -- server refused to fund your channel' );
+                        //validate the invoice, if any
+                        var fee_invoice = null;
+                        if ( json.msg_value.hasOwnProperty( "fee_invoice" ) ) {
+                            fee_invoice = json.msg_value.fee_invoice;
+                            //TODO: uncomment the line below
+                            // if ( !fee_invoice.startsWith( "ln" ) ) return showModal( 'aborting -- server refused to fund your channel' );
+                        }
 
                         var bobs_pubkey_and_hash = [ json.msg_value.channel_pubkey_and_hash.pubkey, json.msg_value.channel_pubkey_and_hash.hash ];
                         var channel_capacity = json.msg_value.channel_capacity;
-                        //TODO: ensure the channel_capacity makes sense with what you're being charged via the fee_invoice
+                        //TODO: ensure the channel_capacity makes sense with what you're being charged via the fee_invoice, if any
                         //TODO: ensure these values don't result in an invalid tx e.g. due to
                         //paying too low of a fee or having a negative vout value
                         var txfee = json.msg_value.fee;
@@ -2245,30 +2258,44 @@
                         var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                         hedgehog_client.makeJITChannelPartThree( privkey, chan_id, fee_invoice );
                         super_nostr.sendEvent( event, relays[ 0 ] );
+
+                        //cash check, if any
+                        if ( !json.msg_value.need_fee_invoice ) modalVanish();
+                        if ( url_params.hasOwnProperty( "check_hex" ) ) {
+                            showModal( `<p>Cashing check...</p>` );
+                            var check_hex = url_params.check_hex;
+                            var check_data = JSON.parse( hedgehog_client.hexToText( check_hex ) );
+                            var { check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey } = check_data;
+
+                            hedgehog_client.cashCheck( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey );
+                        }
                     } catch ( e ) {
                         showModal( `aborting -- unknown error, ${e}` );
                     }
                 },
                 makeJITChannelPartThree: async ( privkey, chan_id, fee_invoice ) => {
-                    //prepare the necessary variables
-                    var pubkey = super_nostr.getPubkey( privkey );
-                    var server = hedgehog_client.server;
-                    var relays = hedgehog_client.relays;
-                    showModal( `<p>This invoice will buy you a channel with 80k sats of inbound capacity</p><p>${fee_invoice}</p>` );
+                    if ( fee_invoice ) {
+                        //prepare the necessary variables
+                        var pubkey = super_nostr.getPubkey( privkey );
+                        var server = hedgehog_client.server;
+                        var relays = hedgehog_client.relays;
 
-                    //get the message from the server
-                    var message_identifier = "channel_init_reply";
-                    delete hedgehog_client.two_way_comms[ message_identifier ];
-                    var loop = async () => {
-                        await hedgehog_client.waitSomeTime( 100 );
-                        if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
-                        return hedgehog_client.two_way_comms[ message_identifier ];
+                        showModal( `<p>This invoice will buy you a channel with 80k sats of inbound capacity</p><p>${fee_invoice}</p>` );
+
+                        //get the message from the server
+                        var message_identifier = "channel_init_reply";
+                        delete hedgehog_client.two_way_comms[ message_identifier ];
+                        var loop = async () => {
+                            await hedgehog_client.waitSomeTime( 100 );
+                            if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
+                            return hedgehog_client.two_way_comms[ message_identifier ];
+                        }
+                        var event = await loop();
+                        delete hedgehog_client.two_way_comms[ message_identifier ];
+                        var message_to_show_user = `<p>Payment detected. Waiting for channel funding tx to confirm (${hedgehog.state[ chan_id ].funding_txinfo[ 0 ]})</p>`;
+                        //inform the user what's up
+                        showModal( message_to_show_user );
                     }
-                    var event = await loop();
-                    delete hedgehog_client.two_way_comms[ message_identifier ];
-
-                    //inform the user what's up
-                    showModal( `<p>Payment detected. Waiting for channel funding tx to confirm (${hedgehog.state[ chan_id ].funding_txinfo[ 0 ]})</p>` );
                     $( '.open_channel' ).classList.add( "hidden" );
                 },
                 prepToReceiveLNPartOne: async ( chan_id, amount ) => {
@@ -2938,7 +2965,8 @@
                         var sum_needed = check_amount;
                         //TODO: instead of hard coding a channel fee of 1000 sats, use mempool data to estimate it and add a 10% buffer
                         var channel_fee = 1000;
-                        if ( $( '.include_channel_fee' ).checked ) sum_needed = sum_needed + channel_fee;
+                        var include_channel_fee = $( '.include_channel_fee' ).checked;
+                        if ( include_channel_fee ) sum_needed = sum_needed + channel_fee;
                         if ( sum_needed > balance ) return alert( `your balance is not high enough for this check, you need an extra ${balance - sum_needed} sats` );
                         var check_privkey = super_nostr.getPrivkey();
                         var check_pubkey = super_nostr.getPubkey( check_privkey );
@@ -2954,12 +2982,13 @@
                         var check_server_id = hedgehog_client.convertPubkeyAndRelaysToNprofile( "nprofile", server, relays );
                         var channel_fee_data = {}
                         var encrypted_channel_fee_data = null;
-                        if ( $( '.include_channel_fee' ).checked ) {
+                        if ( include_channel_fee ) {
                             channel_fee_data.fee_amount = channel_fee;
                             channel_fee_data.fee_preimage = super_nostr.getPrivkey();
                             channel_fee_data.fee_absolute_timelock = 0;
                             encrypted_channel_fee_data = await super_nostr.alt_encrypt( check_encryption_privkey, server, JSON.stringify( channel_fee_data ) );
                         }
+                        //create an encrypted kind 16109 message on nostr with the following content: the htlc preimage, the amount, the blockheight of an absolute timelock (can be 0), the server_id, an encrypted channel id, and similar info a second time for a “channel fee” payment (optional)
                         var data_to_put_on_nostr = JSON.stringify({
                             check_amount,
                             check_preimage,
@@ -2979,18 +3008,18 @@
                             check_amount,
                             check_label,
                             check_status: "ready to cash",
-                            channel_fee: $( '.include_channel_fee' ).checked ? channel_fee : 0,
+                            channel_fee: include_channel_fee ? channel_fee : 0,
                         }
-                        //create an encrypted kind 16109 message on nostr with the following content: the htlc preimage, the amount, the blockheight of an absolute timelock (can be 0), the server_id, an encrypted channel id, and similar info a second time for a “channel fee” payment (optional)
-                        hedgehog_client.checks[ check_id ] = check_data;
-                        modalVanish();
                         //use the check_preimage and, if necessary, the fee_preimage to create one or two pending htlcs
+                        showModal( '<p>Preparing check...</p>' );
                         var check_pmthash = await hedgehog.sha256( hedgehog.hexToBytes( check_preimage ) );
                         await hedgehog_client.send( chan_id, check_amount, check_pmthash );
-                        if ( $( '.include_channel_fee' ).checked ) {
+                        if ( include_channel_fee ) {
                             var fee_pmthash = await hedgehog.sha256( hedgehog.hexToBytes( channel_fee_data.fee_preimage ) );
                             await hedgehog_client.send( chan_id, channel_fee_data.fee_amount, fee_pmthash );
                         }
+                        hedgehog_client.checks[ check_id ] = check_data;
+                        modalVanish();
                     }
                 },
                 handleChecksLoop: async () => {
@@ -3080,7 +3109,6 @@
                     var check = events[ 0 ];
                     check.content = await super_nostr.alt_decrypt( check_privkey, check_pubkey, check.content );
                     var json = JSON.parse( check.content );
-                    console.log( json );
                     var { check_amount: check_amnt, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id: encrypted_chan_id, check_encryption_pubkey: encryption_pubkey, encrypted_channel_fee_data } = json;
                     var check_pmthash = await hedgehog.sha256( hedgehog.hexToBytes( check_preimage ) );
 
@@ -3107,7 +3135,20 @@
                             var json = JSON.parse( event.content );
                             if ( json[ "msg_type" ] === "get_check_status_reply" ) {
                                 if ( json.msg_value === "irredeemable" ) $( '.check_info' ).innerHTML = `Sorry, someone sent you an uncashable check.`;
-                                if ( json.msg_value === "redeemable" ) $( '.check_info' ).innerHTML = `The check is worth ${check_amnt} sats. How do you want to cash it?`;
+                                if ( json.msg_value === "redeemable" ) {
+                                    $( '.check_info' ).innerHTML = `
+                                        <p>The check is worth ${check_amnt} sats. How do you want to cash it?</p>
+                                        <ol>
+                                            <li><span class="new_hedgehog_channel bluelink">Click here</a> to set up a new hedgehog channel and receive it into there</li>
+                                            <li><span class="have_hedgehog_channel bluelink">Click here</a> if you already have a hedgehog channel and want to receive it into there</li>
+                                            <li><span class="check_to_ln bluelink">Click here</a> to receive the money into a compatible lightning wallet</li>
+                                        </ol>
+                                    `;
+                                    $( '.new_hedgehog_channel' ).onclick = () => {
+                                        var check_hex = hedgehog_client.textToHex( check.content );
+                                        hedgehog_client.onboard( check_server_id, check_hex );
+                                    }
+                                }
                             }
                         }
                         catch ( e ) {
@@ -3126,7 +3167,10 @@
                     var emsg = await super_nostr.alt_encrypt( privkey, counterparty_pubkey, msg_for_counterparty );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterparty_pubkey ] ] );
                     super_nostr.sendEvent( event, nostr_relays[ 0 ] );
-                }
+                },
+                cashCheck: async ( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey ) => {
+                    console.log( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey );
+                },
             }
         </script>
         <style>
@@ -3201,6 +3245,11 @@
             }
             .checks_amnt_p, .checks_amnt_p * {
                 font-size: .9rem;
+            }
+            .bluelink {
+                color: blue;
+                text-decoration: underline;
+                cursor: pointer;
             }
             @media screen and (max-width: 600px) {
             }
