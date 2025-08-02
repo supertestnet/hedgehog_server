@@ -1110,6 +1110,7 @@
                         s_recovery_p2_revhash,
                         recipients_rev_preimages: null,
                         recipients_revhashes,
+                        htlc_locktime,
                         amnt,
                         sender: am_alice ? "alice" : "bob",
                         txid_to_check: tapscript.Tx.util.getTxid( senders_version_of_tx1 ),
@@ -1309,6 +1310,7 @@
                     //get data from previous part of process
                     var data_from_part_two = state.data_for_preparing_htlcs[ pmthash ];
                     var amnt = data_from_part_two[ 1 ].part_twos_data_from_sender.amnt;
+                    var htlc_locktime = data_from_part_two[ 1 ].part_twos_data_from_sender.htlc_locktime;
                     var recipients_new_balance = data_from_part_two[ 1 ].recipients_new_balance;
                     var recipients_inital_htlc_scripts = data_from_part_two[ 1 ].recipients_inital_htlc_scripts;
                     var recipients_rev_preimages = data_from_part_two[ 1 ].recipients_rev_preimages;
@@ -1352,6 +1354,7 @@
                         s_recovery_p2_revhash,
                         recipients_rev_preimages,
                         recipients_revhashes,
+                        htlc_locktime,
                         amnt,
                         sender: am_alice ? "bob" : "alice",
                         txid_to_check: tapscript.Tx.util.getTxid( senders_version_of_tx1 ),
@@ -2266,7 +2269,6 @@
                             var check_hex = url_params.check_hex;
                             var check_data = JSON.parse( hedgehog_client.hexToText( check_hex ) );
                             var { check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey } = check_data;
-
                             hedgehog_client.cashCheck( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey );
                         }
                     } catch ( e ) {
@@ -2298,63 +2300,70 @@
                     }
                     $( '.open_channel' ).classList.add( "hidden" );
                 },
-                prepToReceiveLNPartOne: async ( chan_id, amount ) => {
+                prepToReceiveLNPartOne: async ( chan_id, amount, skip_to_resolution ) => {
                     //prepare the needed variables
-                    var preimage = super_nostr.getPrivkey();
-                    var hash = await super_nostr.sha256( super_nostr.hexToBytes( preimage ) );
                     var privkey = hedgehog_client.nostr_privkey;
                     var privkey = hedgehog_client.nostr_privkey;
                     var pubkey = super_nostr.getPubkey( privkey );
                     var server = hedgehog_client.server;
                     var relays = hedgehog_client.relays;
+                    var preimage = super_nostr.getPrivkey();
+                    var hash = await super_nostr.sha256( super_nostr.hexToBytes( preimage ) );
 
-                    //request the server to help you bridge LN to hedgehog
-                    var msg_for_server = JSON.stringify({
-                        msg_type: "request_ln_pmt_to_user",
-                        msg_value: {
-                            chan_id,
-                            amount,
-                            hash,
+                    if ( skip_to_resolution ) {
+                        preimage = skip_to_resolution;
+                        hash = await super_nostr.sha256( super_nostr.hexToBytes( preimage ) );
+                    }
+
+                    if ( !skip_to_resolution ) {
+                        //request the server to help you bridge LN to hedgehog
+                        var msg_for_server = JSON.stringify({
+                            msg_type: "request_ln_pmt_to_user",
+                            msg_value: {
+                                chan_id,
+                                amount,
+                                hash,
+                            }
+                        });
+                        var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
+                        var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
+                        hedgehog_client.makeJITChannelPartTwo( privkey, amount );
+                        super_nostr.sendEvent( event, hedgehog_client.relays[ 0 ] );
+
+                        //get the message from the server
+                        var message_identifier = "ln_invoice_for_user";
+                        delete hedgehog_client.two_way_comms[ message_identifier ];
+                        var loop = async () => {
+                            await hedgehog_client.waitSomeTime( 100 );
+                            if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
+                            return hedgehog_client.two_way_comms[ message_identifier ];
                         }
-                    });
-                    var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
-                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
-                    hedgehog_client.makeJITChannelPartTwo( privkey, amount );
-                    super_nostr.sendEvent( event, hedgehog_client.relays[ 0 ] );
+                        var event = await loop();
+                        delete hedgehog_client.two_way_comms[ message_identifier ];
 
-                    //get the message from the server
-                    var message_identifier = "ln_invoice_for_user";
-                    delete hedgehog_client.two_way_comms[ message_identifier ];
-                    var loop = async () => {
-                        await hedgehog_client.waitSomeTime( 100 );
-                        if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
-                        return hedgehog_client.two_way_comms[ message_identifier ];
+                        //parse the data from the server
+                        var json = JSON.parse( event.content );
+
+                        //validate the invoice
+                        var ln_invoice = json.msg_value.ln_invoice;
+                        //TODO: validate that the ln invoice has the payment hash you expect and the value you expect
+                        //TODO: uncomment the line below
+                        // if ( !ln_invoice.startsWith( "ln" ) ) return showModal( 'aborting -- server refused to fund your channel' );
+
+                        //present the invoice to the user
+                        showModal( `<p>Pay this invoice</p><p>${ln_invoice}</p>` );
+
+                        //get the message from the server
+                        var message_identifier = "ln_invoice_paid";
+                        delete hedgehog_client.two_way_comms[ message_identifier ];
+                        var loop = async () => {
+                            await hedgehog_client.waitSomeTime( 100 );
+                            if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
+                            return hedgehog_client.two_way_comms[ message_identifier ];
+                        }
+                        var event = await loop();
+                        delete hedgehog_client.two_way_comms[ message_identifier ];
                     }
-                    var event = await loop();
-                    delete hedgehog_client.two_way_comms[ message_identifier ];
-
-                    //parse the data from the server
-                    var json = JSON.parse( event.content );
-
-                    //validate the invoice
-                    var ln_invoice = json.msg_value.ln_invoice;
-                    //TODO: validate that the ln invoice has the payment hash you expect and the value you expect
-                    //TODO: uncomment the line below
-                    // if ( !ln_invoice.startsWith( "ln" ) ) return showModal( 'aborting -- server refused to fund your channel' );
-
-                    //present the invoice to the user
-                    showModal( `<p>Pay this invoice</p><p>${ln_invoice}</p>` );
-
-                    //get the message from the server
-                    var message_identifier = "ln_invoice_paid";
-                    delete hedgehog_client.two_way_comms[ message_identifier ];
-                    var loop = async () => {
-                        await hedgehog_client.waitSomeTime( 100 );
-                        if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
-                        return hedgehog_client.two_way_comms[ message_identifier ];
-                    }
-                    var event = await loop();
-                    delete hedgehog_client.two_way_comms[ message_identifier ];
 
                     //get the next message from the server
                     var message_identifier = "two_way_comms";
@@ -2368,7 +2377,7 @@
                     delete hedgehog_client.two_way_comms[ message_identifier ];
 
                     //tell the user what's up
-                    showModal( `<p>Payment detected -- bridging from LN to hedgehog, please wait</p>` );
+                    if ( !skip_to_resolution ) showModal( `<p>Payment detected -- bridging from LN to hedgehog, please wait</p>` );
 
                     //parse the message from the server
                     var json = JSON.parse( event.content );
@@ -3169,7 +3178,33 @@
                     super_nostr.sendEvent( event, nostr_relays[ 0 ] );
                 },
                 cashCheck: async ( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey ) => {
-                    console.log( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey );
+                    //prepare the needed variables
+                    var state = hedgehog.state[ chan_id ];
+                    var privkey = hedgehog_client.nostr_privkey;
+                    var privkey = hedgehog_client.nostr_privkey;
+                    var pubkey = super_nostr.getPubkey( privkey );
+                    var server = hedgehog_client.server;
+                    var relays = hedgehog_client.relays;
+                    var check_pmthash = await super_nostr.sha256( super_nostr.hexToBytes( check_preimage ) );
+
+                    //request the server to send you a hedgehog htlc
+                    var msg_for_server = JSON.stringify({
+                        msg_type: "request_hh_pmt_to_user",
+                        msg_value: {
+                            chan_id,
+                            check_amount,
+                            check_pmthash,
+                            check_absolute_timelock,
+                            check_server_id,
+                            check_encrypted_chan_id,
+                            check_encryption_pubkey,
+                        }
+                    });
+                    var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
+                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
+                    super_nostr.sendEvent( event, hedgehog_client.relays[ 0 ] );
+
+                    hedgehog_client.prepToReceiveLNPartOne( chan_id, check_amount, check_preimage );
                 },
             }
         </script>
