@@ -3433,6 +3433,9 @@
             $( '.send' ).onclick = hedgehog_client.sendBtn;
             $( '.checks' ).onclick = hedgehog_client.showChecks;
             $( '.new_check' ).onclick = hedgehog_client.newCheck;
+            $( '.exit' ).onclick = () => {
+                showModal( `This button doesn't do anything yet` );
+            }
             $$( '.back_btn' ).forEach( item => item.onclick = () => hedgehog_client.showPage( "wallet_page" ) );
             if ( url_params.onboard ) hedgehog_client.onboard();
             if ( url_params.backup_string ) hedgehog_client.login( url_params.backup_string );
