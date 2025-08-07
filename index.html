@@ -2076,7 +2076,15 @@
                     var real_event = state_event;
                     if ( !real_event ) real_event = alt_event;
                     if ( alt_event && alt_event.length > JSON.stringify( real_event ).length ) real_event = JSON.parse( alt_event );
-                    real_event.content = await super_nostr.alt_decrypt( backup_privkey, backup_pubkey, real_event.content );
+                    try {
+                        real_event.content = await super_nostr.alt_decrypt( backup_privkey, backup_pubkey, real_event.content );                        
+                    } catch ( e ) {
+                        console.log( 'no state' );
+                        hedgehog_client.uploadStateLoop();
+                        hedgehog_client.balanceLoop();
+                        hedgehog_client.handleChecksLoop();
+                        return;
+                    }
                     var {
                         network,
                         explorer,
@@ -2160,7 +2168,8 @@
                         amnt_or_check = Number( amnt_or_check );
                         hedgehog_client.prepToReceiveLNPartOne( chan_id, amnt_or_check );
                     }
-                    //return here
+                    url_params.check = amnt_or_check;
+                    hedgehog_client.checkPage();
                 },
                 makeJITChannelPartOne: async ( amount, fee_payment ) => {
                     var msg_for_server = JSON.stringify({
