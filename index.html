@@ -2168,8 +2168,9 @@
                         amnt_or_check = Number( amnt_or_check );
                         hedgehog_client.prepToReceiveLNPartOne( chan_id, amnt_or_check );
                     }
-                    url_params.check = amnt_or_check;
-                    hedgehog_client.checkPage();
+                    url_params.check = amnt_or_check.substring( amnt_or_check.indexOf( "#check=" ) + 7 );
+                    var skip_show = true;
+                    hedgehog_client.checkPage( skip_show );
                 },
                 makeJITChannelPartOne: async ( amount, fee_payment ) => {
                     var msg_for_server = JSON.stringify({
@@ -3114,7 +3115,7 @@
                     dataUriPngImage.style.width = "100%";
                     return dataUriPngImage;
                 },
-                checkPage: async () => {
+                checkPage: async skip_show => {
                     //show check page
                     hedgehog_client.showPage( "check_page" );
 
@@ -3162,26 +3163,37 @@
                             if ( json[ "msg_type" ] === "get_check_status_reply" ) {
                                 if ( json.msg_value === "irredeemable" ) $( '.check_info' ).innerHTML = `Sorry, someone sent you an uncashable check.`;
                                 if ( json.msg_value === "redeemable" ) {
-                                    $( '.check_info' ).innerHTML = `
-                                        <p>The check is worth ${check_amnt} sats. How do you want to cash it?</p>
-                                        <ol>
-                                            <li><span class="new_hedgehog_channel bluelink">Click here</a> to set up a new hedgehog channel and receive it into there</li>
-                                            <li><span class="have_hedgehog_channel bluelink">Click here</a> if you already have a hedgehog channel and want to receive it into there</li>
-                                            <li><span class="check_to_ln bluelink">Click here</a> to receive the money into a compatible lightning wallet</li>
-                                        </ol>
-                                    `;
-                                    $( '.new_hedgehog_channel' ).onclick = () => {
-                                        var check_hex = hedgehog_client.textToHex( check.content );
-                                        hedgehog_client.onboard( check_server_id, check_hex );
-                                    }
-                                    $( '.have_hedgehog_channel' ).onclick = () => {
+                                    if ( !skip_show ) {
+                                        $( '.check_info' ).innerHTML = `
+                                            <p>The check is worth ${check_amnt} sats. How do you want to cash it?</p>
+                                            <ol>
+                                                <li><span class="new_hedgehog_channel bluelink">Click here</a> to set up a new hedgehog channel and receive it into there</li>
+                                                <li><span class="have_hedgehog_channel bluelink">Click here</a> if you already have a hedgehog channel and want to receive it into there</li>
+                                                <li><span class="check_to_ln bluelink">Click here</a> to receive the money into a compatible lightning wallet</li>
+                                            </ol>
+                                        `;
+                                        $( '.new_hedgehog_channel' ).onclick = () => {
+                                            var check_hex = hedgehog_client.textToHex( check.content );
+                                            hedgehog_client.onboard( check_server_id, check_hex );
+                                        }
+                                        $( '.have_hedgehog_channel' ).onclick = () => {
+                                            var chan_id = hedgehog_client.getChanId();
+                                            var check_hex = hedgehog_client.textToHex( check.content );
+                                            var check_data = JSON.parse( hedgehog_client.hexToText( check_hex ) );
+                                            var { check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey } = check_data;
+                                            hedgehog_client.cashCheck( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey );
+                                        }
+                                        $( '.check_to_ln' ).onclick = () => {
+                                            showModal( `This button does not do anything yet` );
+                                        }
+                                    } else {
+                                        hedgehog_client.showPage( "wallet_page" );
+                                        showModal( 'cashing check...' );
+                                        var chan_id = hedgehog_client.getChanId();
                                         var check_hex = hedgehog_client.textToHex( check.content );
                                         var check_data = JSON.parse( hedgehog_client.hexToText( check_hex ) );
                                         var { check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey } = check_data;
                                         hedgehog_client.cashCheck( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey );
-                                    }
-                                    $( '.check_to_ln' ).onclick = () => {
-                                        showModal( `This button does not do anything yet` );
                                     }
                                 }
                             }
