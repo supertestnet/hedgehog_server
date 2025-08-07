@@ -2153,9 +2153,13 @@
                 receive: async () => {
                     var chan_id = hedgehog_client.getChanId();
                     if ( !chan_id ) return alert( 'open a channel first' );
-                    var amnt = Number( prompt( `enter the amount of sats you want to receive, or enter a check` ) );
-                    if ( !amnt ) return;
-                    hedgehog_client.prepToReceiveLNPartOne( chan_id, amnt );
+                    var amnt_or_check = prompt( `enter the amount of sats you want to receive, or enter a check` );
+                    if ( !amnt_or_check ) return;
+                    if ( !isNaN( amnt_or_check ) ) {
+                        amnt_or_check = Number( amnt_or_check );
+                        hedgehog_client.prepToReceiveLNPartOne( chan_id, amnt_or_check );
+                    }
+                    //return here
                 },
                 makeJITChannelPartOne: async ( amount, fee_payment ) => {
                     var msg_for_server = JSON.stringify({
@@ -3066,6 +3070,9 @@
                         div.classList.add( check_id );
                         div.innerHTML = check_html;
                         div.getElementsByClassName( "check_qr_code" )[ 0 ].append( qr );
+                        div.getElementsByClassName( "void_this_check" )[ 0 ].onclick = () => {
+                            showModal( `This button doesn't do anything yet` );
+                        }
                         div.getElementsByClassName( "view_check_qr" )[ 0 ].onclick = () => {
                             var item = $( `.${check_id} .check_qr_code` );
                             if ( item.classList.contains( "hidden" ) ) item.classList.remove( "hidden" );
@@ -3156,6 +3163,15 @@
                                     $( '.new_hedgehog_channel' ).onclick = () => {
                                         var check_hex = hedgehog_client.textToHex( check.content );
                                         hedgehog_client.onboard( check_server_id, check_hex );
+                                    }
+                                    $( '.have_hedgehog_channel' ).onclick = () => {
+                                        var check_hex = hedgehog_client.textToHex( check.content );
+                                        var check_data = JSON.parse( hedgehog_client.hexToText( check_hex ) );
+                                        var { check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey } = check_data;
+                                        hedgehog_client.cashCheck( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey );
+                                    }
+                                    $( '.check_to_ln' ).onclick = () => {
+                                        showModal( `This button does not do anything yet` );
                                     }
                                 }
                             }
