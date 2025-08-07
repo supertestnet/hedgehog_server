@@ -2063,7 +2063,8 @@
                     var limit = 1;
                     var alt_event = localStorage.hedgehog_client_state ? localStorage.hedgehog_client_state : "";
                     if ( alt_event ) alt_event = JSON.parse( alt_event );
-                    var events = await super_nostr.getEvents( relay, ids, authors, kinds, until, since, limit );
+                    //var events = await super_nostr.getEvents( relay, ids, authors, kinds, until, since, limit );
+                    var events = [];
                     if ( !events.length && !alt_event ) {
                         console.log( 'no state' );
                         hedgehog_client.uploadStateLoop();
