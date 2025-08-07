@@ -3386,9 +3386,9 @@
                     <p>Don't have a backup string? <span class="onboard_in_log_in">Onboard!</span></p>
                 `;
                 showModal( content );
-                $( '.onboard_in_log_in' ).onclick = hedgehog_client.onboard;
+                $( '.onboard_in_log_in' ).onclick = () => {hedgehog_client.onboard();}
             }
-            $( '.onboard' ).onclick = hedgehog_client.onboard;
+            $( '.onboard' ).onclick = () => {hedgehog_client.onboard();}
             $( '.open_channel' ).onclick = hedgehog_client.openChannel;
             $( '.receive' ).onclick = hedgehog_client.receive;
             $( '.send' ).onclick = hedgehog_client.sendBtn;
