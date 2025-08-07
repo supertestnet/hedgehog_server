@@ -3137,6 +3137,7 @@
                     var check = events[ 0 ];
                     check.content = await super_nostr.alt_decrypt( check_privkey, check_pubkey, check.content );
                     var json = JSON.parse( check.content );
+                    url_params.server_id = json.check_server_id;
                     var { check_amount: check_amnt, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id: encrypted_chan_id, check_encryption_pubkey: encryption_pubkey, encrypted_channel_fee_data } = json;
                     var check_pmthash = await hedgehog.sha256( hedgehog.hexToBytes( check_preimage ) );
 
