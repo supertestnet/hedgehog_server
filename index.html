@@ -2968,7 +2968,7 @@
                 showChecks: () => hedgehog_client.showPage( "checks_page" ),
                 newCheck: () => {
                     var new_check_html = `
-                        <p style="font-weight: bold;">New check</p>
+                        <p style="font-weight: bold;">New cheque</p>
                         <p>Enter a label</p>
                         <p><input class="new_check_label" placeholder="Money for rent"></p>
                         <p>Enter an amount in sats</p>
@@ -3400,18 +3400,18 @@
             <p><button class="open_channel hidden">Open channel</button></p>
             <p><button class="receive">Receive</button></p>
             <p><button class="send">Send</button></p>
-            <p><button class="checks">Checks</button></p>
+            <p><button class="checks">Cheques</button></p>
             <p><button class="exit">Exit</button></p>
         </div>
         <div class="checks_page hidden">
             <h1>Checks</h1>
-            <p><button class="new_check">New check</button> <button class="back_btn">Back</button></p>
-            <h2>Pending checks</h2>
+            <p><button class="new_check">New cheque</button> <button class="back_btn">Back</button></p>
+            <h2>Pending cheques</h2>
             <div class="pending_checks"></div>
         </div>
         <div class="check_page hidden">
-            <h1>Time to redeem your check</h1>
-            <div class="check_info">loading check info...</div>
+            <h1>Time to redeem your cheque</h1>
+            <div class="check_info">loading cheque info...</div>
         </div>
         <div class="loading_page hidden">
             <p>Loading...</p>
