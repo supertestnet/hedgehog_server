@@ -2160,10 +2160,11 @@
                 openChannel: async () => {
                     hedgehog_client.makeJITChannelPartOne( 40_000 );
                 },
-                receive: async () => {
+                receive: async check => {
                     var chan_id = hedgehog_client.getChanId();
-                    if ( !chan_id ) return alert( 'open a channel first' );
-                    var amnt_or_check = prompt( `enter the amount of sats you want to receive, or enter a check` );
+                    if ( !chan_id && !check ) return alert( 'open a channel first' );
+                    if ( check ) var amnt_or_check = check;
+                    else var amnt_or_check = prompt( `enter the amount of sats you want to receive, or enter a check` );
                     if ( !amnt_or_check ) return;
                     //if the string received is interpretable as a number, then do the following:
                     if ( !isNaN( amnt_or_check ) ) {
@@ -2316,7 +2317,7 @@
                         setTimeout( () => {
                             showModal( `<p>Paying ${cost_of_channel} sats to this address will buy you a channel with 80k sats of inbound capacity</p><p>${fee_address}</p>` );
                         }, 100 );
-                        console.log( 4, `you can send money to the address like this:` );
+                        console.log( `you can send money to the address like this:` );
                         console.log( `var my_network = "${network_string}".split( "," );chain_client.commander( my_network, "send", {destino: "${fee_address}", amnt: 330, feerate: 1} )` );
 
                         //get the message from the server
@@ -2332,7 +2333,6 @@
                         var message_to_show_user = `<p>Payment detected. Waiting for channel funding tx to confirm (${hedgehog.state[ chan_id ].funding_txinfo[ 0 ]})</p>`;
                         //inform the user what's up
                         showModal( message_to_show_user );
-                        console.log( 8, `i am so happy` );
                     }
                     $( '.open_channel' ).classList.add( "hidden" );
                 },
@@ -2347,6 +2347,9 @@
                     var relays = hedgehog_client.relays;
                     var preimage = super_nostr.getPrivkey();
                     var hash = await super_nostr.sha256( super_nostr.hexToBytes( preimage ) );
+
+                    //show the user a pending window
+                    showModal( `<p>Please wait...</p>` );
 
                     //request the server to help you bridge L1 to hedgehog
                     var msg_for_server = JSON.stringify({
@@ -3124,7 +3127,7 @@
                         if ( sum_needed > balance ) return alert( `your balance is not high enough for this check, you need an extra ${balance - sum_needed} sats` );
                         var check_privkey = super_nostr.getPrivkey();
                         var check_pubkey = super_nostr.getPubkey( check_privkey );
-                        var check_relays = hedgehog_client.backup_relays;
+                        var check_relays = hedgehog_client.relays;
                         var check_id = hedgehog_client.convertPubkeyAndRelaysToNprofile( "hh_check_", check_privkey, check_relays );
                         var check_preimage = super_nostr.getPrivkey();
                         var check_absolute_timelock = 0;
@@ -3156,7 +3159,9 @@
                         var event = await super_nostr.prepEvent( check_privkey, encrypted_data, 16109 );
                         var socket_id = Object.keys( super_nostr.sockets )[ 0 ];
                         var socket = super_nostr.sockets[ socket_id ].socket;
-                        super_nostr.sendEvent( event, socket );
+                        var worked = await super_nostr.alt_sendEvent( event, hedgehog_client.relays[ 0 ] );
+                        console.log( worked, event );
+                        //return here
                         var check_data = {
                             data_to_put_on_nostr: JSON.parse( data_to_put_on_nostr ),
                             check_amount,
@@ -3319,12 +3324,25 @@
                                         }
                                     } else {
                                         hedgehog_client.showPage( "wallet_page" );
-                                        showModal( 'cashing check...' );
                                         var chan_id = hedgehog_client.getChanId();
-                                        var check_hex = hedgehog_client.textToHex( check.content );
-                                        var check_data = JSON.parse( hedgehog_client.hexToText( check_hex ) );
-                                        var { check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey } = check_data;
-                                        hedgehog_client.cashCheck( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey );
+                                        if ( chan_id ) {
+                                            showModal( '<p>cashing check with existing channel...</p>' );
+                                            var check_hex = hedgehog_client.textToHex( check.content );
+                                            var check_data = JSON.parse( hedgehog_client.hexToText( check_hex ) );
+                                            var { check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey } = check_data;
+                                            hedgehog_client.cashCheck( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey );
+                                        } else {
+                                            showModal( '<p>opening a new channel...</p>' );
+                                            var check_hex = hedgehog_client.textToHex( check.content );
+                                            hedgehog_client.onboard( check_server_id, check_hex );
+                                            var loop = async () => {
+                                                if ( hedgehog_client.getChanId() ) return;
+                                                await super_nostr.waitSomeTime( 10 );
+                                                return await loop();
+                                            }
+                                            await loop();
+                                            showModal( '<p>you have a new channel now -- about to use it to receive the money -- ignore the next message that says to send 330 sats to a certain address</p>' );
+                                        }
                                     }
                                 }
                             }
@@ -3559,7 +3577,12 @@
             }
             $( '.onboard' ).onclick = () => {hedgehog_client.onboard();}
             $( '.open_channel' ).onclick = hedgehog_client.openChannel;
-            $( '.receive' ).onclick = hedgehog_client.receive;
+            $( '.receive' ).onclick = () => {
+                var chan_id = hedgehog_client.getChanId();
+                var check = null;
+                if ( !chan_id ) check = prompt( `enter a check` );
+                hedgehog_client.receive( check );
+            }
             $( '.send' ).onclick = hedgehog_client.sendBtn;
             $( '.checks' ).onclick = hedgehog_client.showChecks;
             $( '.new_check' ).onclick = hedgehog_client.newCheck;
