@@ -1155,7 +1155,6 @@
                     //send your counterparty the data they need to validate the new state
                     var my_revocation_preimages = state[ "alices_revocation_preimages" ];
                     if ( !am_alice ) my_revocation_preimages = state[ "bobs_revocation_preimages" ];
-                    console.log( 'revocation_of_previous_state:', my_revocation_preimages[ my_revocation_preimages.length - 2 ] );
                     var obj = {
                         to_midstate_sig,
                         finalizer_sig,
@@ -1177,8 +1176,8 @@
                         counterpartys_rev_preimages = state.bobs_revocation_preimages;
                     }
                     //TODO: force close if the following errors are thrown
-                    if ( counterpartys_revhashes.length && !data_from_recipient.hasOwnProperty( "revocation_of_previous_state" ) ) return console.log( 'your counterparty tried to cheat you by not sending requisite data' );
-                    if ( counterpartys_revhashes.length ) {
+                    if ( counterpartys_revhashes.length > 1 && !data_from_recipient.hasOwnProperty( "revocation_of_previous_state" ) ) return console.log( 'your counterparty tried to cheat you by not sending requisite data' );
+                    if ( counterpartys_revhashes.length > 1 ) {
                         var revocation_of_previous_state = data_from_recipient.revocation_of_previous_state;
                         //if your counterparty was the last person to send money, and he did so in a state update that did *not* include an htlc, then he will have a revocation hash that he should *not* revoke here; you will use it next time you send him money, and if he revokes it here, he won't be able to safely receive that money; this also applies if 
                         var num_of_hashes_behind = 1;
@@ -2054,8 +2053,6 @@
                                     delete data_for_htlc_p3[ "message_identifier" ];
                                     delete data_for_htlc_p3[ "more_message_info" ];
                                     var data_for_counterparty = await hedgehog.receiveHtlcPartThree( data_for_htlc_p3 );
-                                    //return here
-                                    console.log( 88, data_for_counterparty );
 
                                     //send channel data to server
                                     var msg_for_counterparty = JSON.stringify({
