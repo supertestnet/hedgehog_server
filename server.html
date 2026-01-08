@@ -16,6 +16,8 @@
                 keypairs: {},
                 network: "testnet",
                 backup_pubkey: "a".repeat( 64 ),
+                nostr_privkey: null,
+                nostr_pubkey: null,
                 hexToBytes: hex => Uint8Array.from( hex.match( /.{1,2}/g ).map( byte => parseInt( byte, 16 ) ) ),
                 bytesToHex: bytes => bytes.reduce( ( str, byte ) => str + byte.toString( 16 ).padStart( 2, "0" ), "" ),
                 getPrivkey: () => hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ),
@@ -1153,6 +1155,7 @@
                     //send your counterparty the data they need to validate the new state
                     var my_revocation_preimages = state[ "alices_revocation_preimages" ];
                     if ( !am_alice ) my_revocation_preimages = state[ "bobs_revocation_preimages" ];
+                    console.log( 'revocation_of_previous_state:', my_revocation_preimages[ my_revocation_preimages.length - 2 ] );
                     var obj = {
                         to_midstate_sig,
                         finalizer_sig,
@@ -1391,7 +1394,7 @@
                         my_revocation_hashes = state.bobs_revocation_hashes;
                     }
                     var data_for_sender = {}
-                    if ( my_revocation_preimages.length ) data_for_sender[ "revocation_of_previous_state" ] = my_revocation_preimages[ my_revocation_preimages.length - 1 ];
+                    if ( my_revocation_preimages.length > 1 ) data_for_sender[ "revocation_of_previous_state" ] = my_revocation_preimages[ my_revocation_preimages.length - 2 ];
                     return data_for_sender;
                 },
                 findPreimage: async ( chan_id, pmthash ) => {
@@ -1990,7 +1993,7 @@
                         var [ type, subId, event ] = JSON.parse( message.data );
                         if ( !event || event === true ) return;
                         try {
-                            event.content = await super_nostr.alt_decrypt( nostr_privkey, event.pubkey, event.content );
+                            event.content = await super_nostr.alt_decrypt( hedgehog_server.nostr_privkey, event.pubkey, event.content );
                             var json = JSON.parse( event.content );
                             console.log( json );
                             if ( json.msg_type === "ping_for_liveness" ) {
@@ -2006,7 +2009,7 @@
                             }
                             if ( json.msg_type === "two_way_comms" ) {
                                 var msg_id = json.msg_value.message_identifier;
-                                var privkey = nostr_privkey;
+                                var privkey = hedgehog_server.nostr_privkey;
                                 var counterparty_pubkey = event.pubkey;
                                 if ( json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "htlc_to_server_part_one" ) {
 
@@ -2051,6 +2054,8 @@
                                     delete data_for_htlc_p3[ "message_identifier" ];
                                     delete data_for_htlc_p3[ "more_message_info" ];
                                     var data_for_counterparty = await hedgehog.receiveHtlcPartThree( data_for_htlc_p3 );
+                                    //return here
+                                    console.log( 88, data_for_counterparty );
 
                                     //send channel data to server
                                     var msg_for_counterparty = JSON.stringify({
@@ -2068,7 +2073,7 @@
                             if ( json.msg_type === "get_check_status" ) {
                                 //prepare requisite variables
                                 var { encrypted_chan_id, check_pmthash, check_amnt, encryption_pubkey, check_absolute_timelock } = json.msg_value;
-                                var privkey = nostr_privkey;
+                                var privkey = hedgehog_server.nostr_privkey;
                                 var counterparty_pubkey = event.pubkey;
                                 var chan_id = await super_nostr.alt_decrypt( privkey, encryption_pubkey, encrypted_chan_id );
                                 chan_id = "b_" + chan_id.substring( 2 );
@@ -2116,7 +2121,7 @@
                             if ( json.msg_type === "pay_ln_invoice_for_user" ) {
                                 //prepare requisite variables
                                 var { encrypted_chan_id, invoice, encryption_pubkey } = json.msg_value;
-                                var privkey = nostr_privkey;
+                                var privkey = hedgehog_server.nostr_privkey;
                                 var user_pubkey = event.pubkey;
                                 var chan_id = await super_nostr.alt_decrypt( privkey, encryption_pubkey, encrypted_chan_id );
                                 chan_id = "b_" + chan_id.substring( 2 );
@@ -2275,7 +2280,7 @@
                                 // var wif = priv_str.split( ":" )[ 1 ];
                                 // var hex_priv = hedgehog_server.getHexFromWif( wif );
                                 var hex_priv = utxos_ill_use[ 0 ].skey;
-                                var encrypted_hex_priv = await super_nostr.alt_encrypt( nostr_privkey, nostr_pubkey, hex_priv );
+                                var encrypted_hex_priv = await super_nostr.alt_encrypt( hedgehog_server.nostr_privkey, nostr_pubkey, hex_priv );
 
                                 //check if we need a fee invoice
                                 var need_fee_payment = true;
@@ -2284,10 +2289,10 @@
                                     var fee_payment_info = json.msg_value.fee_payment;
                                     var encrypted_chan_id = fee_payment_info.encrypted_chan_id;
                                     var encryption_pubkey = fee_payment_info.encryption_pubkey;
-                                    var fee_chan_id = await super_nostr.alt_decrypt( nostr_privkey, encryption_pubkey, encrypted_chan_id );
+                                    var fee_chan_id = await super_nostr.alt_decrypt( hedgehog_server.nostr_privkey, encryption_pubkey, encrypted_chan_id );
                                     fee_chan_id = "b_" + fee_chan_id.substring( 2 );
                                     var encrypted_channel_fee_data = fee_payment_info.encrypted_channel_fee_data;
-                                    var decrypted_channel_fee_data = await super_nostr.alt_decrypt( nostr_privkey, encryption_pubkey, encrypted_channel_fee_data );
+                                    var decrypted_channel_fee_data = await super_nostr.alt_decrypt( hedgehog_server.nostr_privkey, encryption_pubkey, encrypted_channel_fee_data );
                                     var fee_payment_json = JSON.parse( decrypted_channel_fee_data );
                                     var { fee_amount, fee_preimage, fee_absolute_timelock } = fee_payment_json;
 
@@ -2342,7 +2347,7 @@
                                 //     cost_of_fee_invoice = Number( cost_of_fee_invoice );
                                 //     var fee_invoice_preimage = super_nostr.getPrivkey();
                                 //     var fee_invoice_pmthash = await super_nostr.sha256( super_nostr.hexToBytes( fee_invoice_preimage ) );
-                                //     var encrypted_fee_preimage = await super_nostr.alt_encrypt( nostr_privkey, nostr_pubkey, fee_invoice_preimage );
+                                //     var encrypted_fee_preimage = await super_nostr.alt_encrypt( hedgehog_server.nostr_privkey, nostr_pubkey, fee_invoice_preimage );
 
                                 //     //make the fee invoice
                                 //     var method = 'add_hold_invoice';
@@ -2388,7 +2393,7 @@
                                     msg_value: hedgehog_server.data_for_channel_opens[ event.pubkey ],
                                 });
                                 console.log( 'replying:', message_for_user );
-                                var privkey = nostr_privkey;
+                                var privkey = hedgehog_server.nostr_privkey;
                                 var pubkey = nostr_pubkey;
                                 var emsg = await super_nostr.alt_encrypt( privkey, event.pubkey, message_for_user );
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", event.pubkey ] ] );
@@ -2428,7 +2433,7 @@
                                 });
                                 if ( sum_of_utxos - channel_capacity - txfee > 330 ) funding_tx.vout.push( hedgehog.getVout( sum_of_utxos - channel_capacity - txfee, change_address ) );
                                 var encrypted_hex_priv = prev_data.encrypted_hex_priv;
-                                var tx_priv = await super_nostr.alt_decrypt( nostr_privkey, nostr_pubkey, encrypted_hex_priv );
+                                var tx_priv = await super_nostr.alt_decrypt( hedgehog_server.nostr_privkey, nostr_pubkey, encrypted_hex_priv );
                                 var tx_pub = nobleSecp256k1.getPublicKey( tx_priv, true );
                                 // var sig = tapscript.Signer.segwit.sign( tx_priv, funding_tx, 0, { sigflag: 1, pubkey: tx_pub });
                                 var sig = tapscript.Signer.taproot.sign( tx_priv, funding_tx, 0 );
@@ -2463,7 +2468,7 @@
                                         msg_value: 'fee invoice is paid',
                                     });
                                     console.log( 'replying:', message_for_user );
-                                    var privkey = nostr_privkey;
+                                    var privkey = hedgehog_server.nostr_privkey;
                                     var pubkey = nostr_pubkey;
                                     var user_pubkey = event.pubkey;
                                     var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
@@ -2484,7 +2489,7 @@
                             if ( json.msg_type === "request_hh_pmt_to_user" ) {
                                 //prepare the needed variables
                                 var { chan_id, check_amount, check_pmthash, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey } = json.msg_value;
-                                var privkey = nostr_privkey;
+                                var privkey = hedgehog_server.nostr_privkey;
                                 var pubkey = nostr_pubkey;
                                 var user_pubkey = event.pubkey;
                                 var chan_id = "b_" + json.msg_value.chan_id.substring( 2 );
@@ -2550,7 +2555,7 @@
                             }
                             if ( json.msg_type === "request_l1_pmt_to_user" ) {
                                 //prepare the needed variables
-                                var privkey = nostr_privkey;
+                                var privkey = hedgehog_server.nostr_privkey;
                                 var pubkey = nostr_pubkey;
                                 var user_pubkey = event.pubkey;
                                 var chan_id = "b_" + json.msg_value.chan_id.substring( 2 );
@@ -2624,7 +2629,7 @@
                             }
                             if ( json.msg_type === "request_ln_pmt_to_user" ) {
                                 //prepare the needed variables
-                                var privkey = nostr_privkey;
+                                var privkey = hedgehog_server.nostr_privkey;
                                 var pubkey = nostr_pubkey;
                                 var user_pubkey = event.pubkey;
                                 var chan_id = "b_" + json.msg_value.chan_id.substring( 2 );
@@ -2710,7 +2715,7 @@
                             }
                             if ( json.msg_type === "resolve_htlc_to_user" ) {
                                 //prepare the needed variables
-                                var privkey = nostr_privkey;
+                                var privkey = hedgehog_server.nostr_privkey;
                                 var pubkey = nostr_pubkey;
                                 var user_pubkey = event.pubkey;
                                 var chan_id = "b_" + json.msg_value.chan_id.substring( 2 );
@@ -2866,7 +2871,7 @@
                                 delete json.msg_value[ "pmt_preimage" ];
                                 var new_state_info = json.msg_value;
                                 var chan_id = "b_" + new_state_info.chan_id.substring( 2 );
-                                var privkey = nostr_privkey;
+                                var privkey = hedgehog_server.nostr_privkey;
                                 var user_pubkey = event.pubkey;
                                 var state = hedgehog.state[ chan_id ];
                                 var am_alice = !!state.alices_priv;
@@ -3029,8 +3034,8 @@
                             msg_value: data_for_user,
                         });
                         console.log( 'sending data:', message_for_user );
-                        var privkey = nostr_privkey;
-                        var pubkey = nostr_pubkey;
+                        var privkey = hedgehog_server.nostr_privkey;
+                        var pubkey = hedgehog_server.nostr_pubkey;
                         var user_pubkey = hedgehog_server.comms_keys[ chan_id ][ 0 ];
                         var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
                         var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
@@ -3063,7 +3068,7 @@
                     console.log( 5, 'i am asking this counterparty:', chan_id, 'to resolve the htlc with this pmthash:', pmthash );
                     var counterparty_pubkey = hedgehog_server.comms_keys[ chan_id ][ 0 ];
                     if ( !counterparty_pubkey ) return console.log( 'cannot ask that counterparty -- no nostr pubkey on file' );
-                    var privkey = nostr_privkey;
+                    var privkey = hedgehog_server.nostr_privkey;
                     var msg_for_counterparty = JSON.stringify({
                         msg_type: "htlc_to_server_part_zero",
                         msg_value: {preimage, chan_id},
@@ -3202,7 +3207,16 @@
         <script>
             var init = async() => {
                 console.log( 'setting up testnet...' );
-                var [ network_privkey, network_string ] = await chain_client.createNetwork( [ nostr_relays[ 0 ] ] );
+                var promiseA = async () => {
+                    return await chain_client.createNetwork( [ nostr_relays[ 0 ] ] );
+                }
+                var promiseB = async () => {
+                    await super_nostr.waitSomeTime( 30_000 );
+                    return "timed out";
+                }
+                var reply = await Promise.any( [ promiseA(), promiseB() ] );
+                if ( reply === "timed out" ) return alert( `could not connect to nostr relay, try again` );
+                var [ network_privkey, network_string ] = reply;
                 console.log( 'testnet is set up!' );
                 console.log( 'getting coins...' );
                 var blockhash = await chain_client.commander( network_string.split( "," ), "genblock" );
@@ -3228,18 +3242,19 @@
                 console.log( 'blockhash:', blockhash, 'txhex:', txhex );
                 console.log( 'success! You have 500_000 sats' );
                 hedgehog_server.setUpComms();
-                var connection = await hedgehog_server.listenOnNostr( nostr_pubkey, network_string );
+                var connection = await hedgehog_server.listenOnNostr( hedgehog_server.nostr_pubkey, network_string );
                 hedgehog_server.asyncResolvingLoop();
                 console.log( 'server id:' );
                 console.log( server_id );
             }
-            var nostr_relays = [ "wss://relay.nuts.cash/" ];
+            // var nostr_relays = [ "wss://relay.nuts.cash/" ];
+            var nostr_relays = [ "ws://127.0.0.1:6969" ];
             var minimum_channel_capacity = 80_000;
             var inbound_capacity_fee = 330; //if you set a fee of 1 and set 'absolute' below, you will charge 1 sat per channel regardless of its size; if you set a fee of 1 and set 'percent' below, you will charge 1% of the channel capacity instead
             var inbound_capacity_fee_type = 'absolute'; //can be 'absolute' or change to 'percent'
-            var nostr_privkey = super_nostr.getPrivkey();
-            var nostr_pubkey = super_nostr.getPubkey( nostr_privkey );
-            var server_id = hedgehog_server.convertPubkeyAndRelaysToNprofile( "nprofile", nostr_pubkey, nostr_relays );
+            hedgehog_server.nostr_privkey = super_nostr.getPrivkey();
+            hedgehog_server.nostr_pubkey = super_nostr.getPubkey( hedgehog_server.nostr_privkey );
+            var server_id = hedgehog_server.convertPubkeyAndRelaysToNprofile( "nprofile", hedgehog_server.nostr_pubkey, nostr_relays );
             init();
         </script>
     </body>
