@@ -226,7 +226,7 @@
                         vout,
                     });
                 },
-                getTx2: ( chan_id, am_sender, tx1_txid, midstate, recipients_new_balance, sum_of_senders_htlcs = 0, am_alice_for_tx2 ) => {
+                getTx2: ( chan_id, am_sender, tx1_txid, midstate, recipients_new_balance, sum_of_alices_htlcs = 0, sum_of_bobs_htlcs = 0, am_alice_for_tx2, amnt_in_output_0 ) => {
                     //tx2 is used during a force closure
                     //it takes money from the midstate and creates the latest state
                     //prepare variables necessary for creating tx2
@@ -252,14 +252,18 @@
 
                     //account for the loss of 480 sats due to anchor outputs
                     //note that 240 is the dust limit for v3 "anchor outputs"
-                    if ( sender_is_alice ) alices_amnt = alices_amnt - 240 - 240 - sum_of_senders_htlcs;
-                    else bobs_amnt = bobs_amnt - 240 - 240 - sum_of_senders_htlcs;
+                    if ( sender_is_alice ) alices_amnt = alices_amnt - 240 - 240;
+                    else bobs_amnt = bobs_amnt - 240 - 240;
+
+                    //subtract alice's htlcs from her amount and bob's htlcs from his
+                    alices_amnt = alices_amnt - sum_of_alices_htlcs;
+                    bobs_amnt = bobs_amnt - sum_of_bobs_htlcs;
 
                     //prepare and return tx2
                     var tx = tapscript.Tx.create({
                         version: 3,
                         vin: [
-                            hedgehog.getVin( tx1_txid, 0, state.funding_txinfo[ 2 ] - 240 - sum_of_senders_htlcs, midstate, 3 ),
+                            hedgehog.getVin( tx1_txid, 0, amnt_in_output_0, midstate, 3 ),
                         ],
                         vout: [
                             hedgehog.getVout( 240, "51024e73" ),
@@ -324,6 +328,7 @@
 
                     //prepare tx1 and the variables needed for broadcasting it
                     var tx1 = hedgehog.getTx1( chan_id, am_sender, htlc_addy_and_amnt, midstate_scripts_override );
+                    var amnt_in_output_0 = Number( tx1.vout[ 0 ].value );
                     var tx1_txid = tapscript.Tx.util.getTxid( tx1 );
                     var channel_scripts = hedgehog.getChannelScripts( chan_id );
                     var [ _, channel_tree, channel_cblock ] = hedgehog.getAddressData( channel_scripts, 0 );
@@ -363,20 +368,19 @@
                     if ( uses_htlc ) recipients_new_balance = recipients_old_balance;
 
                     //prepare tx2
-                    var sum_of_senders_htlcs = 0;
+                    //we need to know the sum of each party's pending htlcs to deduct them from that user's tx2 balance
+                    var sum_of_alices_htlcs = 0;
+                    var sum_of_bobs_htlcs = 0;
                     var latest_state = state.channel_states[ state.channel_states.length - 1 ];
-                    //TODO: instead of getting *all* pending htlcs, just get the ones relevant
-                    //to the current transaction -- e.g. if you are creating a justice tx for
-                    //a state many states ago, some pending htlcs may have been created *after*
-                    //that state and thus should be ignored when creating the justice transaction
-                    //perhaps I should pass the relevant htlcs to this function as a parameter
                     pending_htlcs.forEach( htlc => {
-                        if ( ( am_alice && htlc.sender === "alice" ) || ( !am_alice && htlc.sender === "bob" ) ) sum_of_senders_htlcs = sum_of_senders_htlcs + htlc.amnt;
+                        if ( htlc.sender === "alice" ) sum_of_alices_htlcs = sum_of_alices_htlcs + htlc.amnt;
+                        else sum_of_bobs_htlcs = sum_of_bobs_htlcs + htlc.amnt;
                     });
                     if ( htlc_addy_and_amnt ) {
-                        if ( ( am_alice && sender_of_htlc === "alice" ) || ( !am_alice && sender_of_htlc === "bob" ) ) sum_of_senders_htlcs = htlc_addy_and_amnt[ 1 ];
+                        if ( sender_of_htlc === "alice" ) sum_of_alices_htlcs = htlc_addy_and_amnt[ 1 ];
+                        else sum_of_bobs_htlcs = htlc_addy_and_amnt[ 1 ];
                     }
-                    var tx2 = hedgehog.getTx2( chan_id, am_sender, tx1_txid, midstate, recipients_new_balance, sum_of_senders_htlcs, am_alice );
+                    var tx2 = hedgehog.getTx2( chan_id, am_sender, tx1_txid, midstate, recipients_new_balance, sum_of_alices_htlcs, sum_of_bobs_htlcs, am_alice, amnt_in_output_0 );
 
                     //if the sender received money at any point, they must revoke the most recent tx by
                     //which they received money, so we prepare that tx if necessary so they can sign it
@@ -700,6 +704,7 @@
                     if ( overwrite_pending_htlcs ) pending_htlcs = overwrite_pending_htlcs;
                     var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, null, null, null, pending_htlcs );
                     var [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
+
                     //getTxData always returns 10 items. It also returns two additional items if a conditional revocation was needed on a prior state, so in that cirucmstance we also grab those two additional items so that we can validate the signatures involving them
                     if ( txs.length > 10 ) {
                         var conditional_revocation_tx = txs[ 10 ];
@@ -2189,7 +2194,8 @@
                                 //TODO: return success message to whoever requested that this invoice be paid
 
                                 //ask your counterparty to resolve the htlc whenever they are online
-                                hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ] = preimage;
+                                if ( !hedgehog_server.channels_with_htlcs_that_need_resolving.hasOwnProperty( chan_id ) ) hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ] = [];
+                                hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].push( preimage );
                                 return;
                             }
                             if ( json.msg_type === "channel_request" ) {
@@ -2281,7 +2287,7 @@
 
                                 //check if we need a fee invoice
                                 var need_fee_payment = true;
-                                if ( json.msg_value.hasOwnProperty( "fee_payment" ) && json.msg_value.hasOwnProperty( "encrypted_channel_fee_data" ) && json.msg_value.encrypted_channel_fee_data ) {
+                                if ( json.msg_value.hasOwnProperty( "fee_payment" ) && json.msg_value.fee_payment.hasOwnProperty( "encrypted_chan_id" ) && json.msg_value.fee_payment.hasOwnProperty( "encrypted_channel_fee_data" ) && json.msg_value.fee_payment.encrypted_channel_fee_data ) {
                                     //extract fee payment info
                                     var fee_payment_info = json.msg_value.fee_payment;
                                     var encrypted_chan_id = fee_payment_info.encrypted_chan_id;
@@ -2315,11 +2321,11 @@
                                             amnt_of_pending_htlc = htlc.amnt;
                                         });
                                         if ( index_of_pending_htlc >= 0 ) {
-                                            //TODO: mark the fee payment as ready for settlement next time the sender gets online
+                                            //ask your counterparty to resolve the htlc whenever they are online
                                             pending_htlcs[ index_of_pending_htlc ].pmt_preimage = fee_preimage;
                                             need_fee_payment = false;
-                                            //ask the counterparty to resolve that htlc if they are online
-                                            hedgehog_server.channels_with_htlcs_that_need_resolving[ fee_chan_id ] = fee_preimage;
+                                        if ( !hedgehog_server.channels_with_htlcs_that_need_resolving.hasOwnProperty( fee_chan_id ) ) hedgehog_server.channels_with_htlcs_that_need_resolving[ fee_chan_id ] = [];
+                                            hedgehog_server.channels_with_htlcs_that_need_resolving[ fee_chan_id ].push( fee_preimage );
                                             //TODO: reimburse the fee payer for the unused portion of their htlc, now if possible, otherwise whenever they are next online
                                         }
                                     }
@@ -2412,6 +2418,7 @@
                                 var txfee = prev_data.fee;
                                 var change_address = prev_data.change_address;
                                 var need_fee_payment = prev_data.need_fee_payment;
+                                //return here
                                 console.log( 6, 'need_fee_payment, right?', need_fee_payment );
                                 var sum_of_utxos = 0;
                                 prev_data.utxos.forEach( utxo => sum_of_utxos = sum_of_utxos + utxo.amnt );
@@ -2515,6 +2522,10 @@
                                 });
                                 if ( index_of_pending_htlc < 0 ) return;
 
+                                //add the pmthash to a list of htlcs to resolve when you learn their preimage
+                                hedgehog_server.pmthashes_with_htlcs_that_need_resolving[ pmthash ] = inbound_chan_id;
+                                console.log( 'yyyyyyyyyyyyy', JSON.parse( JSON.stringify( Object.keys( hedgehog_server.pmthashes_with_htlcs_that_need_resolving ) ) ) );
+
                                 //check absolute timelock info
                                 //TODO: allow absolute timelocks other than 0
                                 //TODO: also compare it with the one in the actual htlc
@@ -2544,11 +2555,11 @@
                                 var htlc_pmthash = pmthash;
                                 hedgehog_server.comms_keys[ chan_id ] = [ user_pubkey, Math.floor( Date.now() / 1000 ) ];
                                 var success_pmthash = await hedgehog.sendHtlc( chan_id, check_amount, htlc_locktime, htlc_pmthash, block_when_i_must_force_close );
-                                if ( success_pmthash !== htlc_pmthash ) return `error: ${success_pmthash}`;
+                                if ( success_pmthash !== htlc_pmthash ) {
+                                    delete hedgehog_server.pmthashes_with_htlcs_that_need_resolving[ pmthash ];
+                                    return `error: ${success_pmthash}`;
+                                }
                                 console.log( 'htlc is sent' );
-
-                                //add the pmthash to a list of htlcs to resolve when you learn their preimage
-                                hedgehog_server.pmthashes_with_htlcs_that_need_resolving[ pmthash ] = inbound_chan_id;
                             }
                             if ( json.msg_type === "request_l1_pmt_to_user" ) {
                                 //prepare the needed variables
@@ -2710,7 +2721,8 @@
                                 console.log( 'htlc is sent' );
                                 return;
                             }
-                            if ( json.msg_type === "resolve_htlc_to_user" ) {
+                            if ( json.msg_type === "resolve_htlc_to_user_part_one" ) {
+                                console.log( 'zzzzzzzzzzz', 1 );
                                 //prepare the needed variables
                                 var privkey = hedgehog_server.nostr_privkey;
                                 var pubkey = nostr_pubkey;
@@ -2727,6 +2739,7 @@
                                     //TODO: force close the channel
                                     return console.log( 'time to close the channel', preimage_is_hex, preimage_is_right_length, preimage );
                                 }
+                                console.log( 'zzzzzzzzzzz', 2 );
 
                                 //settle any inbound LN invoices that use that preimage
                                 var method = 'settle_hold_invoice';
@@ -2735,14 +2748,18 @@
                                     //TODO: check if this is an L1 payment, and if so, sweep the funds from the swap address instead of querying electrum
                                     queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
                                 } catch ( e ) {}
+                                console.log( 'zzzzzzzzzzz', 3 );
 
                                 //settle any inbound HH htlcs that use that preimage
                                 var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
+                                console.log( 'zzzzzzzzzzz', 4, 'reminding myself to resolve the htlc with this preimage:', preimage, 'and this pmthash:', pmthash, JSON.parse( JSON.stringify( Object.keys( hedgehog_server.pmthashes_with_htlcs_that_need_resolving ) ) ) );
                                 Object.keys( hedgehog_server.pmthashes_with_htlcs_that_need_resolving ).every( item => {
                                     if ( item !== pmthash ) return true;
                                     var chan_id = hedgehog_server.pmthashes_with_htlcs_that_need_resolving[ pmthash ];
                                     //ask your counterparty to resolve the htlc whenever they are online
-                                    hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ] = preimage;
+                                    if ( !hedgehog_server.channels_with_htlcs_that_need_resolving.hasOwnProperty( chan_id ) ) hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ] = [];
+                                    console.log( 'zzzzzzzzzzz', 5, 'reminding myself to resolve the htlc with this preimage:', preimage, 'and this pmthash:', pmthash );
+                                    hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].push( preimage );
                                     delete hedgehog_server.pmthashes_with_htlcs_that_need_resolving[ pmthash ];
                                 });
 
@@ -2860,6 +2877,7 @@
                                 return;
                             }
                             if ( json.msg_type === "resolve_htlc_to_server_part_two" ) {
+                                console.log( 'fffffffff' );
                                 //parse the message from the user
                                 var json = JSON.parse( event.content );
                                 var message_identifier = json.msg_value.message_identifier;
@@ -2872,6 +2890,7 @@
                                 var user_pubkey = event.pubkey;
                                 var state = hedgehog.state[ chan_id ];
                                 var am_alice = !!state.alices_priv;
+                                console.log( 'ggggggggggg' );
 
                                 //find the to-be-resolved htlc
                                 var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
@@ -2893,11 +2912,13 @@
                                     //TODO: force close the channel
                                     return console.log( 'time to close the channel' );
                                 }
+                                console.log( 'hhhhhhhhhhhhh' );
 
                                 //create a pending_htlcs array without that htlc
                                 var new_pending_htlcs = JSON.parse( JSON.stringify( pending_htlcs ) );
                                 var htlc_to_remove = JSON.parse( JSON.stringify( pending_htlcs[ index_of_pending_htlc ] ) );
                                 new_pending_htlcs.splice( index_of_pending_htlc, 1 );
+                                console.log( 'iiiiiiiiiiiiiii' );
 
                                 //create and sign a tx1 and tx2 based on that pending_htlcs array, and with the value of the htlc added to your side of the channel, and add the new state to your ch_states array
                                 var amnt = amnt_of_pending_htlc;
@@ -2909,6 +2930,7 @@
                                 // console.log( 14, `now you can see whether I properly added one or not:`, state.alices_revocation_hashes );
                                 //TODO: force close if the error below is thrown
                                 if ( !new_state_is_valid ) return console.log( 'error, this counterparty:', chan_id, 'tried to cheat you by refusing to resolve an htlc' );
+                                console.log( 'jjjjjjjjjjj' );
 
                                 //revoke old state and tell counterparty
                                 var state_update = await hedgehog.send( chan_id, 0 );
@@ -2920,6 +2942,7 @@
                                 var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, msg_for_counterparty );
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
                                 super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                console.log( 'kkkkkkkkkkkkk' );
 
                                 //TODO: if your counterparty does not reply in a few seconds, force close
                                 //get counterparty's revocations
@@ -2933,6 +2956,7 @@
                                 }
                                 var event = await loop();
                                 delete hedgehog_server.two_way_comms[ message_identifier ];
+                                console.log( 'lllllllllllllll' );
 
                                 //parse the message from your counterparty
                                 var json = JSON.parse( event.content );
@@ -2946,6 +2970,7 @@
                                 var new_state_is_valid = await hedgehog.receive( json.msg_value, new_pending_htlcs );
                                 //TODO: force close if the error below is thrown
                                 if ( !new_state_is_valid ) return console.log( 'error, this counterparty:', chan_id, 'tried to cheat you by refusing to resolve an htlc' );
+                                console.log( 'mmmmmmmmmmmmm' );
 
                                 //verify he revoked his recovery-path and the htlc midstate
                                 var calculated_midstate_hash = await hedgehog.sha256( hedgehog.hexToBytes( s_midstate_rev_preimage ) );
@@ -2954,10 +2979,12 @@
                                 var expected_recovery_hash = htlc_to_remove.s_recovery_p2_revhash;
                                 //TODO: force close if the error below is thrown
                                 if ( calculated_midstate_hash !== expected_midstate_hash || calculated_recovery_hash !== expected_recovery_hash ) return console.log( 'error, your counterparty tried to cheat you by sending invalid revocation data' );
+                                console.log( 'nnnnnnnnnnnnnn' );
 
                                 //save the revocation data
                                 hedgehog.state[ chan_id ].channel_states[ hedgehog.state[ chan_id ].channel_states.length - 4 ].pending_htlcs[ index_of_pending_htlc ].s_midstate_rev_preimage = s_midstate_rev_preimage;
                                 hedgehog.state[ chan_id ].channel_states[ hedgehog.state[ chan_id ].channel_states.length - 4 ].pending_htlcs[ index_of_pending_htlc ].s_recovery_p2_rev_preimage = s_recovery_p2_rev_preimage;
+                                console.log( '0000000000000000' );
 
                                 //send your counterparty your reveal-path rev_preimage and your htlc midstate rev_preimage
                                 var msg_for_counterparty = JSON.stringify({
@@ -2968,7 +2995,9 @@
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
                                 super_nostr.sendEvent( event, nostr_relays[ 0 ] );
 
-                                console.log( 'htlc resolved' );
+                                console.log( 'pppppppppppppp' );
+                                console.log( 'qqqqqqqqqqqqq', 'htlc resolved. preimage:', preimage, 'pmthash:', pmthash );
+                                if ( hedgehog_server.channels_with_htlcs_that_need_resolving.hasOwnProperty( chan_id ) && hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].indexOf( preimage ) > -1 ) hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].splice( hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].indexOf( preimage ), 1 );
                             }
                             if ( json.msg_type === "resolve_htlc_to_server_part_four" ) {
                                 if ( hedgehog_server.two_way_comms.hasOwnProperty( json.msg_type ) && hedgehog_server.two_way_comms[ json.msg_type ] === "waiting_for_info" ) hedgehog_server.two_way_comms[ json.msg_type ] = event;
@@ -3067,7 +3096,7 @@
                     if ( !counterparty_pubkey ) return console.log( 'cannot ask that counterparty -- no nostr pubkey on file' );
                     var privkey = hedgehog_server.nostr_privkey;
                     var msg_for_counterparty = JSON.stringify({
-                        msg_type: "htlc_to_server_part_zero",
+                        msg_type: "resolve_htlc_to_server_part_one",
                         msg_value: {preimage, chan_id},
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, counterparty_pubkey, msg_for_counterparty );
@@ -3107,8 +3136,14 @@
                         //ensure channel has matching htlc
                         var state = hedgehog.state[ chan_id ];
                         var am_alice = !!state.alices_priv;
-                        var preimage = hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ];
+                        if ( !hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].length ) {
+                            console.log( 'skipping because nothing to resolve' );
+                            delete hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ];
+                            continue;
+                        }
+                        var preimage = hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ][ 0 ];
                         var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
+                        console.log( 'resolving an htlc with this pmthash:', pmthash, 'and this preimage:', preimage );
                         var index_of_pending_htlc = -1;
                         var amnt_of_pending_htlc = null;
                         var pending_htlcs = [];
@@ -3127,21 +3162,19 @@
                             amnt_of_pending_htlc = htlc.amnt;
                         });
                         if ( index_of_pending_htlc < 0 ) {
-                            console.log( 'skipping because no matching unbound htlc found' );
-                            delete hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ];
+                            console.log( 'skipping because no matching unresolved htlc found' );
+                            hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].splice( hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].indexOf( preimage ), 1 );
                             continue;
                         }
 
-                        //ask them to resolve their htlc whenever they are online
+                        //ask them to resolve their htlc since they seem to be online
                         hedgehog_server.askCounterpartyToResolveHtlc( chan_id, preimage );
-                        console.log( 'LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME LOOK AT ME' );
                         var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
-                        console.log( 4, 'i am asking this counterparty:', chan_id, 'to resolve the htlc with this pmthash:', pmthash );
 
                         //do not ask that user for another 5 minutes
                         hedgehog_server.comms_keys[ chan_id ][ 1 ] = now + 300;
                     }
-                    //the user pings the server every 10 seconds, so I check every 9 seconds, that way I don't get into a weird loop where I only check right after before they ping me and miss it each time
+                    //the user pings the server every 10 seconds, so I check every 9 seconds, that way I don't get into a weird loop where I only check right after they ping me and miss it each time
                     await hedgehog_server.waitSomeTime( 9_000 );
                     hedgehog_server.asyncResolvingLoop();
                 },
