@@ -2877,7 +2877,6 @@
                                 return;
                             }
                             if ( json.msg_type === "resolve_htlc_to_server_part_two" ) {
-                                console.log( 'fffffffff' );
                                 //parse the message from the user
                                 var json = JSON.parse( event.content );
                                 var message_identifier = json.msg_value.message_identifier;
@@ -2890,7 +2889,6 @@
                                 var user_pubkey = event.pubkey;
                                 var state = hedgehog.state[ chan_id ];
                                 var am_alice = !!state.alices_priv;
-                                console.log( 'ggggggggggg' );
 
                                 //find the to-be-resolved htlc
                                 var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
@@ -2912,13 +2910,11 @@
                                     //TODO: force close the channel
                                     return console.log( 'time to close the channel' );
                                 }
-                                console.log( 'hhhhhhhhhhhhh' );
 
                                 //create a pending_htlcs array without that htlc
                                 var new_pending_htlcs = JSON.parse( JSON.stringify( pending_htlcs ) );
                                 var htlc_to_remove = JSON.parse( JSON.stringify( pending_htlcs[ index_of_pending_htlc ] ) );
                                 new_pending_htlcs.splice( index_of_pending_htlc, 1 );
-                                console.log( 'iiiiiiiiiiiiiii' );
 
                                 //create and sign a tx1 and tx2 based on that pending_htlcs array, and with the value of the htlc added to your side of the channel, and add the new state to your ch_states array
                                 var amnt = amnt_of_pending_htlc;
@@ -2930,7 +2926,6 @@
                                 // console.log( 14, `now you can see whether I properly added one or not:`, state.alices_revocation_hashes );
                                 //TODO: force close if the error below is thrown
                                 if ( !new_state_is_valid ) return console.log( 'error, this counterparty:', chan_id, 'tried to cheat you by refusing to resolve an htlc' );
-                                console.log( 'jjjjjjjjjjj' );
 
                                 //revoke old state and tell counterparty
                                 var state_update = await hedgehog.send( chan_id, 0 );
@@ -2942,7 +2937,6 @@
                                 var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, msg_for_counterparty );
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
                                 super_nostr.sendEvent( event, nostr_relays[ 0 ] );
-                                console.log( 'kkkkkkkkkkkkk' );
 
                                 //TODO: if your counterparty does not reply in a few seconds, force close
                                 //get counterparty's revocations
@@ -2956,7 +2950,6 @@
                                 }
                                 var event = await loop();
                                 delete hedgehog_server.two_way_comms[ message_identifier ];
-                                console.log( 'lllllllllllllll' );
 
                                 //parse the message from your counterparty
                                 var json = JSON.parse( event.content );
@@ -2970,7 +2963,6 @@
                                 var new_state_is_valid = await hedgehog.receive( json.msg_value, new_pending_htlcs );
                                 //TODO: force close if the error below is thrown
                                 if ( !new_state_is_valid ) return console.log( 'error, this counterparty:', chan_id, 'tried to cheat you by refusing to resolve an htlc' );
-                                console.log( 'mmmmmmmmmmmmm' );
 
                                 //verify he revoked his recovery-path and the htlc midstate
                                 var calculated_midstate_hash = await hedgehog.sha256( hedgehog.hexToBytes( s_midstate_rev_preimage ) );
@@ -2979,12 +2971,10 @@
                                 var expected_recovery_hash = htlc_to_remove.s_recovery_p2_revhash;
                                 //TODO: force close if the error below is thrown
                                 if ( calculated_midstate_hash !== expected_midstate_hash || calculated_recovery_hash !== expected_recovery_hash ) return console.log( 'error, your counterparty tried to cheat you by sending invalid revocation data' );
-                                console.log( 'nnnnnnnnnnnnnn' );
 
                                 //save the revocation data
                                 hedgehog.state[ chan_id ].channel_states[ hedgehog.state[ chan_id ].channel_states.length - 4 ].pending_htlcs[ index_of_pending_htlc ].s_midstate_rev_preimage = s_midstate_rev_preimage;
                                 hedgehog.state[ chan_id ].channel_states[ hedgehog.state[ chan_id ].channel_states.length - 4 ].pending_htlcs[ index_of_pending_htlc ].s_recovery_p2_rev_preimage = s_recovery_p2_rev_preimage;
-                                console.log( '0000000000000000' );
 
                                 //send your counterparty your reveal-path rev_preimage and your htlc midstate rev_preimage
                                 var msg_for_counterparty = JSON.stringify({
@@ -2995,8 +2985,7 @@
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
                                 super_nostr.sendEvent( event, nostr_relays[ 0 ] );
 
-                                console.log( 'pppppppppppppp' );
-                                console.log( 'qqqqqqqqqqqqq', 'htlc resolved. preimage:', preimage, 'pmthash:', pmthash );
+                                //remove the preimage from the list of htlcs to resolve
                                 if ( hedgehog_server.channels_with_htlcs_that_need_resolving.hasOwnProperty( chan_id ) && hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].indexOf( preimage ) > -1 ) hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].splice( hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].indexOf( preimage ), 1 );
                             }
                             if ( json.msg_type === "resolve_htlc_to_server_part_four" ) {
