@@ -2040,6 +2040,7 @@
                 },
                 login: async ( backup_string, check_hex ) => {
                     hedgehog_client.pingServer();
+                    hedgehog_client.manageChecks();
                     var [ backup_privkey, backup_relays ] = hedgehog_client.convertNEvent( backup_string );
                     hedgehog_client.backup_privkey = backup_privkey;
                     hedgehog_client.backup_relays = backup_relays;
@@ -2771,7 +2772,6 @@
                             var json = JSON.parse( event.content );
                             console.log( json, json[ "msg_type" ] === "resolve_htlc_to_server_part_one" );
                             if ( json[ "msg_type" ] === "resolve_htlc_to_server_part_one" ) {
-                                console.log( 111111111 );
                                 var preimage = json[ "msg_value" ][ "preimage" ];
                                 var chan_id = json[ "msg_value" ][ "chan_id" ];
                                 chan_id = "a_" + chan_id.substring( 2 );
@@ -2781,7 +2781,6 @@
                                 var relays = hedgehog_client.relays;
                                 var state = hedgehog.state[ chan_id ];
                                 var am_alice = !!state.alices_priv;
-                                console.log( 22222222222 );
 
                                 //find the to-be-resolved htlc
                                 var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
@@ -2799,12 +2798,10 @@
                                     index_of_pending_htlc = index;
                                     amnt_of_pending_htlc = htlc.amnt;
                                 });
-                                console.log( 33333333333 );
 
                                 //TODO: abort if either of the errors below are thrown
                                 if ( index_of_pending_htlc < 0 ) return console.log( 'aborting because the server tried to cheat you by getting you to resolve an htlc that does not exist' );
                                 if ( pending_htlcs[ index_of_pending_htlc ].sender !== "alice" ) return console.log( 'aborting because the server tried to cheat you by getting you to resolve an htlc you did not create' );
-                                console.log( 4444444444 );
 
                                 hedgehog_client.resolveHtlcToServer( chan_id, preimage );
                                 return;
@@ -2926,14 +2923,12 @@
                     super_nostr.sendEvent( event, relays[ 0 ] );
                 },
                 resolveHtlcToServer: async ( chan_id, preimage ) => {
-                    console.log( 555555555555 );
                     var privkey = hedgehog_client.nostr_privkey;
                     var pubkey = super_nostr.getPubkey( privkey );
                     var server = hedgehog_client.server;
                     var relays = hedgehog_client.relays;
                     var state = hedgehog.state[ chan_id ];
                     var am_alice = !!state.alices_priv;
-                    console.log( 66666666666 );
 
                     //find the relevant htlc
                     var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
@@ -2949,20 +2944,17 @@
                         index_of_pending_htlc = index;
                         amnt_of_pending_htlc = htlc.amnt;
                     });
-                    console.log( 7777777777777 );
 
                     //create a pending_htlcs array without that htlc
                     var new_pending_htlcs = JSON.parse( JSON.stringify( pending_htlcs ) );
                     var htlc_to_remove = JSON.parse( JSON.stringify( pending_htlcs[ index_of_pending_htlc ] ) );
                     new_pending_htlcs.splice( index_of_pending_htlc, 1 );
-                    console.log( 888888888888 );
 
                     //create and sign a tx1 and tx2 based on that pending_htlcs array, and with the value of the htlc added to your counterparty's side of the channel, and add the new state to your ch_states array
                     var amnt = amnt_of_pending_htlc;
                     console.log( 'my revocation preimages:', state.alices_revocation_preimages, 'my revocation hashes:', state.alices_revocation_hashes );
                     var object_for_counterparty = await hedgehog.send( chan_id, amnt, new_pending_htlcs );
                     object_for_counterparty[ "pmt_preimage" ] = preimage;
-                    console.log( 9999999999999 );
 
                     //get your counterparty to sign the new state
                     var message_identifier = super_nostr.getPrivkey();
@@ -2974,7 +2966,6 @@
                     var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_counterparty );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                     super_nostr.sendEvent( event, relays[ 0 ] );
-                    console.log( 'aaaaaaaaaaaaaaa' );
 
                     //TODO: if your counterparty does not reply in a few seconds, force close
                     //get the next message from your counterparty
@@ -2986,19 +2977,16 @@
                     }
                     var event = await loop();
                     delete hedgehog_client.two_way_comms[ message_identifier ];
-                    console.log( 'bbbbbbbbbbb' );
 
                     //parse the message from your counterparty
                     var json = JSON.parse( event.content );
                     delete json.msg_value[ "message_identifier" ];
-                    console.log( 'cccccccccccc' );
 
                     //validate the new state
                     if ( json.msg_value.amnt !== 0 ) return console.log( 'error, your counterparty tried to cheat by doing a non-blank state update' );
                     var new_state_is_valid = await hedgehog.receive( json.msg_value, new_pending_htlcs );
                     //TODO: force close if the error below is thrown
                     if ( !new_state_is_valid ) return console.log( 'error, your counterparty tried to cheat you by refusing to resolve an htlc' );
-                    console.log( 'ddddddddddddd' );
 
                     //revoke all prior states
                     //send your counterparty the following items: your recovery-path rev_preimage, your htlc midstate rev_preimage, and a new blank state update
@@ -3008,7 +2996,6 @@
                         msg_type: "resolve_htlc_to_server_part_four",
                         msg_value: {...state_update, s_midstate_rev_preimage: htlc_to_remove.s_midstate_rev_preimage, s_recovery_p2_rev_preimage: htlc_to_remove.s_recovery_p2_rev_preimage},
                     });
-                    console.log( 'eeeeeeeeeeeeee' );
                     console.log( 'replying:', message_for_server );
                     var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
@@ -3440,6 +3427,29 @@
                     super_nostr.sendEvent( event, hedgehog_client.relays[ 0 ] );
                     await hedgehog_client.waitSomeTime( 10_000 );
                     hedgehog_client.pingServer();
+                },
+                manageChecks: async () => {
+                    var i; for ( i=0; i<Object.keys( hedgehog_client.checks ).length; i++ ) {
+                        var check_id = Object.keys( hedgehog_client.checks )[ i ];
+                        var preimage = hedgehog_client.checks[ check_id ].data_to_put_on_nostr.check_preimage;
+                        var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
+                        var chan_id = hedgehog_client.getChanId();
+                        var state = hedgehog.state[ chan_id ];
+                        var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                        var am_alice = !!state.alices_priv;
+                        var htlc_still_exists = false;
+                        var j; for ( j=0; j<latest_state.pending_htlcs.length; j++ ) {
+                            var htlc = latest_state.pending_htlcs[ j ];
+                            if ( htlc.pmthash !== pmthash ) continue;
+                            var sender = htlc.sender;
+                            if ( am_alice && sender !== "alice" ) continue;
+                            if ( !am_alice && sender !== "bob" ) continue;
+                            htlc_still_exists = true;
+                        }
+                        if ( !htlc_still_exists ) delete hedgehog_client.checks[ check_id ];
+                    }
+                    await hedgehog_client.waitSomeTime( 100 );
+                    hedgehog_client.manageChecks();
                 },
             }
         </script>
