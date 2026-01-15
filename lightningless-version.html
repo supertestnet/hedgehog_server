@@ -160,6 +160,17 @@
                         [ sweepers_pub, "OP_CHECKSIGVERIFY", relative_timelock, "OP_CHECKSEQUENCEVERIFY" ],
                     ];
                 },
+                getStandardHTLCScripts: ( chan_id, alice_wants_htlc, pmthash, relative_timelock ) => {
+                    var state = hedgehog.state[ chan_id ];
+                    var am_alice = !!state.alices_priv;
+                    var senders_pub = alice_wants_htlc ? state.alices_pub : state.bobs_pub;
+                    var counterpartys_pub = alice_wants_htlc ? state.bobs_pub : state.alices_pub;
+
+                    return [
+                        [ "OP_SIZE", 32, "OP_EQUALVERIFY", "OP_SHA256", pmthash, "OP_EQUALVERIFY", senders_pub, "OP_CHECKSIG" ],
+                        [ relative_timelock, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", counterpartys_pub, "OP_CHECKSIG" ],
+                    ];
+                },
                 getRevocableScripts: ( chan_id, sender_is_revoker, am_sender, revhash ) => {
                     var state = hedgehog.state[ chan_id ];
                     var am_alice = !!state.alices_priv;
@@ -821,7 +832,6 @@
                     var sender_is_revoker = true;
                     var recovery_htlc_scripts = hedgehog.getRevocableScripts( chan_id, sender_is_revoker, am_sender, s_recovery_p2_revhash );
                     var [ recovery_htlc_addy ] = hedgehog.getAddressData( recovery_htlc_scripts, 0 );
-                    console.log( 88, recovery_htlc_scripts, tapscript.Address.toScriptPubKey( recovery_htlc_addy ), am_sender );
                     // console.log( 'recovery_htlc_scripts:', recovery_htlc_scripts );
                     // console.log( 'recovery_htlc_addy:', recovery_htlc_addy );
 
@@ -1098,8 +1108,7 @@
                                 if ( !sig_on_recipients_recovery_p1_tx || !sig_on_senders_recovery_p1_tx ) return console.log( `error, counterparty tried to cheat you by not sending all required signatures` );
                                 var sig_on_recipients_recovery_p1_tx_is_valid = await nobleSecp256k1.schnorr.verify( sig_on_recipients_recovery_p1_tx, recipients_recovery_p1_sighash, recipients_pub );
                                 var sig_on_senders_recovery_p1_tx_is_valid = await nobleSecp256k1.schnorr.verify( sig_on_senders_recovery_p1_tx, senders_recovery_p1_sighash, recipients_pub );
-                                console.log( 37, JSON.stringify( recipients_recovery_p1_tx ), recipients_initial_htlc_tree, JSON.stringify( recipients_version_of_tx1 ) );
-                                if ( !sig_on_recipients_recovery_p1_tx_is_valid || !sig_on_senders_recovery_p1_tx_is_valid ) return console.log( 'error, counterparty tried to cheat you by providing invalid signatures:', sig_on_recipients_recovery_p1_tx_is_valid, sig_on_senders_recovery_p1_tx_is_valid );
+                                if ( !sig_on_recipients_recovery_p1_tx_is_valid || !sig_on_senders_recovery_p1_tx_is_valid ) return console.log( 'error, counterparty tried to cheat you by providing invalid signatures' );
                             } else {
                                 //check the reveal tx sigs
                                 var senders_reveal_p1_sighash = tapscript.Signer.taproot.hash( senders_reveal_p1_tx, 0, {extension: senders_initial_htlc_tree[ 0 ] }).hex;
@@ -1372,7 +1381,6 @@
                                 var [ senders_initial_htlc_addy, senders_initial_htlc_tree, senders_initial_htlc_cblock ] = hedgehog.getAddressData( senders_initial_htlc_scripts, 1 );
                                 var sig_on_senders_recovery_p1_tx = tapscript.Signer.taproot.sign( privkey, senders_recovery_p1_tx, 0, {extension: senders_initial_htlc_tree[ 1 ]} ).hex;
                                 var sig_on_recipients_recovery_p1_tx = tapscript.Signer.taproot.sign( privkey, recipients_recovery_p1_tx, 0, {extension: recipients_initial_htlc_tree[ 1 ]} ).hex;
-                                console.log( 36, JSON.stringify( recipients_recovery_p1_tx ), recipients_initial_htlc_tree, JSON.stringify( recipients_version_of_tx1 ) );
                                 my_htlc_sigs.push({
                                     sig_on_senders_recovery_p1_tx,
                                     sig_on_recipients_recovery_p1_tx,
@@ -2130,6 +2138,7 @@
         <script>
             var hedgehog_client = {
                 network: "testnet4/",
+                network_string: null,
                 explorer: "mempool.space",
                 server: null,
                 relays: null,
@@ -2428,6 +2437,7 @@
                     //validate the utxo data
                     if ( typeof json.msg_value.utxos === "string" ) return showModal( 'aborting -- server did not have enough money to fund this channel' );
                     var network_string = json.msg_value.network_string;
+                    hedgehog_client.network_string = network_string;
                     var cost_of_channel = json.msg_value.cost_of_channel;
                     var all_is_well = true;
                     try {
@@ -3077,9 +3087,7 @@
                         if ( !invoice ) return;
                         hedgehog_client.sendViaLN( chan_id, invoice );
                     } else {
-                        return alert( 'sending via L1 is not supported yet' );
-                        // var address = prompt( `enter an L1 address` );
-                        // if ( !address ) return;
+                        hedgehog_client.sendViaL1( chan_id );
                     }
                 },
                 send: async ( chan_id, amnt, pmthash, absolute_timelock ) => {
@@ -3093,6 +3101,86 @@
                     var htlc_pending = await hedgehog_client.send( chan_id, amnt, pmthash );
                     if ( !htlc_pending ) return console.log( 'error, no htlc was created' );
                     hedgehog_client.askServerToPayLNInvoice( chan_id, invoice );
+                },
+                sendViaL1: async ( chan_id, destino, amnt ) => {
+                    var state = hedgehog.state[ chan_id ];
+                    var am_alice = !!state.alices_priv;
+                    if ( am_alice ) var privkey = hedgehog.state[ chan_id ].alices_priv;
+                    else var privkey = hedgehog.state[ chan_id ].bobs_priv;
+                    if ( !destino ) destino = prompt( `enter a bitcoin address you want to send money to` );
+                    if ( !destino ) return;
+                    if ( !hedgehog.isValidAddress( destino ) ) return alert( 'that is not a valid bitcoin address' );
+                    var preimage = hedgehog.getPrivkey();
+                    var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
+                    if ( !amnt ) amnt = Number( prompt( `enter the amount you want to send there` ) );
+                    if ( !amnt ) return;
+                    if ( amnt < 2000 ) return alert( 'the minimum amount is 2000 sats' );
+                    //TODO: get swap fee from server
+                    var swap_fee = 500;
+                    //TODO: get an L1 fee estimate from the mempool
+                    var L1_fee = 500;
+                    var conf = confirm( `click ok if you don't mind paying ${swap_fee + L1_fee} sats extra in swap fees, or click cancel if you don't want to do this anymore` );
+                    if ( !conf ) return;
+                    var htlc_amnt = amnt + swap_fee + L1_fee;
+                    var htlc_pending = await hedgehog_client.send( chan_id, htlc_amnt, pmthash );
+                    if ( !htlc_pending ) return console.log( 'error, no htlc was created' );
+                    hedgehog_client.askServerToPayL1Address( chan_id, pmthash );
+
+                    //get the htlc address
+                    var alice_wants_htlc = true;
+                    var relative_timelock = 10;
+                    var htlc_scripts = hedgehog.getStandardHTLCScripts( chan_id, alice_wants_htlc, pmthash, relative_timelock );
+                    var [ htlc_addy, htlc_tree, htlc_cblock ] = hedgehog.getAddressData( htlc_scripts, 0 );
+
+                    //check if the htlc got funded
+                    var network_string = hedgehog_client.network_string;
+                    var my_network = network_string.split( "," );
+                    var loop = async () => {
+                        console.log( `checking if htlc got funded: ${htlc_addy}` );
+                        var utxos = await chain_client.commander( my_network, "utxos", htlc_addy );
+                        var sum_of_utxos = 0;
+                        utxos.forEach( utxo => sum_of_utxos = sum_of_utxos + utxo.value );
+                        if ( sum_of_utxos >= amnt + L1_fee ) return utxos;
+                        await super_nostr.waitSomeSeconds( 1 );
+                        return loop();
+                    }
+                    //TODO: force close if the htlc is not funded in a timely manner and you don't get some sort of error message from the server
+                    var htlc_addy_got_funded = await loop();
+
+                    //prepare the sweep tx
+                    var utxos_to_sweep = htlc_addy_got_funded;
+                    var sum_of_utxos = 0;
+                    var vin = [];
+                    utxos_to_sweep.forEach( utxo => {
+                        sum_of_utxos = sum_of_utxos + utxo.value;
+                        vin.push({
+                            txid: utxo.txid,
+                            vout: utxo.vout,
+                            prevout: {
+                                value: utxo.value,
+                                scriptPubKey: tapscript.Address.toScriptPubKey( htlc_addy ),
+                            },
+                        });
+                    });
+                    var sweep_tx = tapscript.Tx.create({
+                        vin,
+                        vout: [{
+                            value: sum_of_utxos - L1_fee,
+                            scriptPubKey: tapscript.Address.toScriptPubKey( destino ),
+                        }],
+                    });
+
+                    //sign the sweep tx
+                    vin.forEach( ( _, index ) => {
+                        var sig = tapscript.Signer.taproot.sign( privkey, sweep_tx, index, {extension: htlc_tree[ 0 ] }).hex;
+                        sweep_tx.vin[ index ].witness = [ sig, preimage, htlc_scripts[ 0 ], htlc_cblock ];
+                    });
+
+                    //broadcast the sweep tx
+                    var txhex = tapscript.Tx.encode( sweep_tx ).hex;
+                    console.log( 'broadcast this:', txhex );
+                    console.log( `you can broadcast the tx like this:` );
+                    console.log( `var my_network = "${network_string}".split( "," );chain_client.commander( my_network, "broadcast", "${txhex}" )` );
                 },
                 askServerToPayLNInvoice: async ( chan_id, invoice ) => {
                     var privkey = super_nostr.getPrivkey();
@@ -3109,6 +3197,26 @@
                     var message_for_counterparty = JSON.stringify({
                         msg_type: "pay_ln_invoice_for_user",
                         msg_value: {encrypted_chan_id, invoice, encryption_pubkey},
+                    });
+                    var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_counterparty );
+                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
+                    super_nostr.sendEvent( event, relays[ 0 ] );
+                },
+                askServerToPayL1Address: async ( chan_id, pmthash ) => {
+                    var privkey = super_nostr.getPrivkey();
+                    var pubkey = super_nostr.getPubkey( privkey );
+                    var server = hedgehog_client.server;
+                    var relays = hedgehog_client.relays;
+
+                    //encrypt the channel id
+                    var encryption_privkey = super_nostr.getPrivkey();
+                    var encryption_pubkey = super_nostr.getPubkey( encryption_privkey );
+                    var encrypted_chan_id = await super_nostr.alt_encrypt( encryption_privkey, server, chan_id );
+
+                    //send invoice to server
+                    var message_for_counterparty = JSON.stringify({
+                        msg_type: "pay_l1_address_for_user",
+                        msg_value: {encrypted_chan_id, pmthash, encryption_pubkey},
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_counterparty );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
