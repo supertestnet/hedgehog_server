@@ -155,6 +155,17 @@
                         [ sweepers_pub, "OP_CHECKSIGVERIFY", relative_timelock, "OP_CHECKSEQUENCEVERIFY" ],
                     ];
                 },
+                getStandardHTLCScripts: ( chan_id, alice_wants_htlc, pmthash, relative_timelock ) => {
+                    var state = hedgehog.state[ chan_id ];
+                    var am_alice = !!state.alices_priv;
+                    var senders_pub = alice_wants_htlc ? state.alices_pub : state.bobs_pub;
+                    var counterpartys_pub = alice_wants_htlc ? state.bobs_pub : state.alices_pub;
+
+                    return [
+                        [ "OP_SIZE", 32, "OP_EQUALVERIFY", "OP_SHA256", pmthash, "OP_EQUALVERIFY", senders_pub, "OP_CHECKSIG" ],
+                        [ relative_timelock, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", counterpartys_pub, "OP_CHECKSIG" ],
+                    ];
+                },
                 getRevocableScripts: ( chan_id, sender_is_revoker, am_sender, revhash ) => {
                     var state = hedgehog.state[ chan_id ];
                     var am_alice = !!state.alices_priv;
@@ -2354,6 +2365,107 @@
                                 if ( !hedgehog_server.channels_with_htlcs_that_need_resolving.hasOwnProperty( chan_id ) ) hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ] = [];
                                 hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].push( preimage );
                                 return;
+                            }
+                            if ( json.msg_type === "pay_l1_address_for_user" ) {
+                                //prepare requisite variables
+                                var { encrypted_chan_id, pmthash, encryption_pubkey } = json.msg_value;
+                                var privkey = hedgehog_server.nostr_privkey;
+                                var user_pubkey = event.pubkey;
+                                var chan_id = await super_nostr.alt_decrypt( privkey, encryption_pubkey, encrypted_chan_id );
+                                chan_id = "b_" + chan_id.substring( 2 );
+                                var state = hedgehog.state[ chan_id ];
+                                var am_alice = !!state.alices_priv;
+
+                                //find the pending htlc
+                                var index_of_pending_htlc = -1;
+                                var amnt_of_pending_htlc = null;
+                                var extra_outputs = [];
+                                var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                                if ( latest_state && latest_state.hasOwnProperty( "extra_outputs" ) ) extra_outputs = latest_state.extra_outputs;
+                                //TODO: send back an error message
+                                if ( !extra_outputs.length ) return console.log( 'aborting because an unknown person wants to resolve an htlc that does not exist' );
+                                extra_outputs.every( ( htlc, index ) => {
+                                    if ( htlc.pmthash !== pmthash ) return true;
+                                    if ( am_alice && htlc.sender === "alice" ) return true;
+                                    if ( !am_alice && htlc.sender === "bob" ) return true;
+                                    index_of_pending_htlc = index;
+                                    amnt_of_pending_htlc = htlc.amnt;
+                                });
+                                //TODO: send back an error message
+                                if ( index_of_pending_htlc < 0 ) return console.log( 'aborting because an unknown person wants to resolve an htlc that does not exist' );
+                                var pending_htlc = extra_outputs[ index_of_pending_htlc ];
+                                //TODO: send back an error message
+                                if ( pending_htlc.sender === "bob" && !am_alice || pending_htlc.sender === "alice" && am_alice ) return console.log( 'aborting because an unknown person wants to resolve an htlc that does not pay you' );
+
+                                //prepare an L1 htlc with the user's payment hash, such that the user can sweep the htlc if and only if they reveal the preimage, otherwise you get the money back after a 10 block timelock
+                                var alice_wants_htlc = true;
+                                var relative_timelock = 10;
+                                var htlc_scripts = hedgehog.getStandardHTLCScripts( chan_id, alice_wants_htlc, pmthash, relative_timelock );
+                                var [ htlc_addy, htlc_tree, htlc_cblock ] = hedgehog.getAddressData( htlc_scripts, 1 );
+
+                                //fund the htlc
+                                //TODO: make the swap fee vary depending on mining fees and bridge operator policy
+                                var swap_fee = 500;
+                                var htlc_amnt = pending_htlc.amnt - swap_fee;
+                                if ( htlc_amnt < 546 ) return console.log( `aborting because someone wants to do an L1 swap that would create a utxo with a value below bitcoin's dust limit` );
+                                var my_network = network_string.split( "," );
+                                console.log( `time to fund the htlc!` );
+                                console.log( `you can send money to the htlc like this:` );
+                                console.log( `var my_network = "${network_string}".split( "," );chain_client.commander( my_network, "send", {destino: "${htlc_addy}", amnt: ${htlc_amnt}, feerate: 1} )` );
+
+                                //check its status on loop
+                                var loop = async () => {
+                                    console.log( `checking if htlc got funded: ${htlc_addy}` );
+                                    var utxos = await chain_client.commander( my_network, "utxos", htlc_addy );
+                                    var sum_of_utxos = 0;
+                                    utxos.forEach( utxo => sum_of_utxos = sum_of_utxos + utxo.value );
+                                    if ( sum_of_utxos >= htlc_amnt ) return;
+                                    await super_nostr.waitSomeSeconds( 1 );
+                                    return loop();
+                                }
+                                var htlc_addy_got_funded = await loop();
+
+                                //prepare to resolve the off-chain htlc, and force close if the user abandons the protocol
+                                alert( `click ok after the user acts` );
+                                await hedgehog_server.waitSomeTime( 100 );
+                                var user_swept_htlc = confirm( `click ok if the user swept the htlc, otherwise, if 10 blocks go by without them doing that, click cancel` );
+                                if ( !user_swept_htlc ) {
+                                    //TODO: force close
+                                    //TODO: prepare and broadcast a sweep tx
+                                    //TODO: in case the user initiates a race condition after you broadcast your sweep tx (by broadcasting one of their own), continue to watch the mempool and the block for their preimage until your tx has 3 confirmations, and if you see their preimage, use it to take the money from the htlc created by your force close transaction
+                                    return;
+                                }
+
+                                //get the user's sweep tx
+                                var my_network = network_string.split( "," );
+                                var spend_txs = await chain_client.commander( my_network, "spend_txs", htlc_addy );
+                                var sweep_txid = spend_txs[ 0 ].substring( 0, 64 );
+                                var sweep_tx = await chain_client.commander( my_network, "rawtx", sweep_txid );
+                                console.log( `here is the user's sweep tx:` );
+                                console.log( sweep_tx );
+
+                                //get the preimage from the sweep tx
+                                var preimage = null;
+                                var tx = tapscript.Tx.decode( sweep_tx );
+                                var i; for ( i=0; i<tx.vin.length; i++ ) {
+                                    var witness = tx.vin[ i ].witness;
+                                    var j; for ( j=0; j<witness.length; j++ ) {
+                                        var actual_hash = await hedgehog.sha256( hedgehog.hexToBytes( witness[ j ] ) );
+                                        if ( actual_hash === pmthash ) {
+                                            preimage = witness[ j ];
+                                            break;
+                                        }
+                                    }
+                                    if ( preimage ) break;
+                                }
+                                console.log( `here is the preimage from the user's sweep tx:`, preimage );
+                                await hedgehog_server.waitSomeTime( 10 );
+                                var preimage = prompt( `enter the preimage from the user's sweep tx` );
+                                extra_outputs[ index_of_pending_htlc ].pmt_preimage = preimage;
+
+                                //ask your counterparty to resolve the htlc whenever they are online
+                                if ( !hedgehog_server.channels_with_htlcs_that_need_resolving.hasOwnProperty( chan_id ) ) hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ] = [];
+                                hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].push( preimage );
                             }
                             if ( json.msg_type === "channel_request" ) {
                                 //find out how much money to put in this channel
