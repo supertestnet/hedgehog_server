@@ -160,15 +160,10 @@
                         [ sweepers_pub, "OP_CHECKSIGVERIFY", relative_timelock, "OP_CHECKSEQUENCEVERIFY" ],
                     ];
                 },
-                getStandardHTLCScripts: ( chan_id, alice_wants_htlc, pmthash, relative_timelock ) => {
-                    var state = hedgehog.state[ chan_id ];
-                    var am_alice = !!state.alices_priv;
-                    var senders_pub = alice_wants_htlc ? state.alices_pub : state.bobs_pub;
-                    var counterpartys_pub = alice_wants_htlc ? state.bobs_pub : state.alices_pub;
-
+                getStandardHTLCScripts: ( senders_pubkey, counterpartys_pubkey, pmthash, relative_timelock ) => {
                     return [
-                        [ "OP_SIZE", 32, "OP_EQUALVERIFY", "OP_SHA256", pmthash, "OP_EQUALVERIFY", senders_pub, "OP_CHECKSIG" ],
-                        [ relative_timelock, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", counterpartys_pub, "OP_CHECKSIG" ],
+                        [ "OP_SIZE", 32, "OP_EQUALVERIFY", "OP_SHA256", pmthash, "OP_EQUALVERIFY", senders_pubkey, "OP_CHECKSIG" ],
+                        [ relative_timelock, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", counterpartys_pubkey, "OP_CHECKSIG" ],
                     ];
                 },
                 getRevocableScripts: ( chan_id, sender_is_revoker, am_sender, revhash ) => {
@@ -3103,10 +3098,6 @@
                     hedgehog_client.askServerToPayLNInvoice( chan_id, invoice );
                 },
                 sendViaL1: async ( chan_id, destino, amnt ) => {
-                    var state = hedgehog.state[ chan_id ];
-                    var am_alice = !!state.alices_priv;
-                    if ( am_alice ) var privkey = hedgehog.state[ chan_id ].alices_priv;
-                    else var privkey = hedgehog.state[ chan_id ].bobs_priv;
                     if ( !destino ) destino = prompt( `enter a bitcoin address you want to send money to` );
                     if ( !destino ) return;
                     if ( !hedgehog.isValidAddress( destino ) ) return alert( 'that is not a valid bitcoin address' );
@@ -3124,12 +3115,15 @@
                     var htlc_amnt = amnt + swap_fee + L1_fee;
                     var htlc_pending = await hedgehog_client.send( chan_id, htlc_amnt, pmthash );
                     if ( !htlc_pending ) return console.log( 'error, no htlc was created' );
-                    hedgehog_client.askServerToPayL1Address( chan_id, pmthash );
+                    var senders_privkey = super_nostr.getPrivkey();
+                    hedgehog_client.askServerToPayL1Address( chan_id, pmthash, senders_privkey );
 
                     //get the htlc address
                     var alice_wants_htlc = true;
                     var relative_timelock = 10;
-                    var htlc_scripts = hedgehog.getStandardHTLCScripts( chan_id, alice_wants_htlc, pmthash, relative_timelock );
+                    var senders_pubkey = hedgehog.getPubkey( senders_privkey );
+                    var counterpartys_pubkey = hedgehog_client.server;
+                    var htlc_scripts = hedgehog.getStandardHTLCScripts( senders_pubkey, counterpartys_pubkey, pmthash, relative_timelock );
                     var [ htlc_addy, htlc_tree, htlc_cblock ] = hedgehog.getAddressData( htlc_scripts, 0 );
 
                     //check if the htlc got funded
@@ -3146,6 +3140,16 @@
                     }
                     //TODO: force close if the htlc is not funded in a timely manner and you don't get some sort of error message from the server
                     var htlc_addy_got_funded = await loop();
+
+                    //ask the user if they want to wait for a confirmation
+                    var wait_for_conf = confirm( `the server funded a swap address and wants you to resolve your htlc, but, unless you trust the server, it is not safe to do so til their tx confirms, otherwise the server can doublespend. Click ok to wait for a confirmation or click cancel if you trust the server enough to resolve the htlc now` );
+                    if ( wait_for_conf ) {
+                        //TODO: automate waiting for confirmations
+                        var htlc_utxos = htlc_addy_got_funded;
+                        var msg = `click ok when these transactions all confirm:`;
+                        htlc_utxos.forEach( utxo => msg += `\n${utxo.txid}` );
+                        alert( msg );
+                    }
 
                     //prepare the sweep tx
                     var utxos_to_sweep = htlc_addy_got_funded;
@@ -3172,7 +3176,7 @@
 
                     //sign the sweep tx
                     vin.forEach( ( _, index ) => {
-                        var sig = tapscript.Signer.taproot.sign( privkey, sweep_tx, index, {extension: htlc_tree[ 0 ] }).hex;
+                        var sig = tapscript.Signer.taproot.sign( senders_privkey, sweep_tx, index, {extension: htlc_tree[ 0 ] }).hex;
                         sweep_tx.vin[ index ].witness = [ sig, preimage, htlc_scripts[ 0 ], htlc_cblock ];
                     });
 
@@ -3193,7 +3197,7 @@
                     var encryption_pubkey = super_nostr.getPubkey( encryption_privkey );
                     var encrypted_chan_id = await super_nostr.alt_encrypt( encryption_privkey, server, chan_id );
 
-                    //send invoice to server
+                    //ask server to pay LN invoice
                     var message_for_counterparty = JSON.stringify({
                         msg_type: "pay_ln_invoice_for_user",
                         msg_value: {encrypted_chan_id, invoice, encryption_pubkey},
@@ -3202,9 +3206,8 @@
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                     super_nostr.sendEvent( event, relays[ 0 ] );
                 },
-                askServerToPayL1Address: async ( chan_id, pmthash ) => {
-                    var privkey = super_nostr.getPrivkey();
-                    var pubkey = super_nostr.getPubkey( privkey );
+                askServerToPayL1Address: async ( chan_id, pmthash, privkey ) => {
+                    var senders_pubkey = super_nostr.getPubkey( privkey );
                     var server = hedgehog_client.server;
                     var relays = hedgehog_client.relays;
 
@@ -3213,10 +3216,10 @@
                     var encryption_pubkey = super_nostr.getPubkey( encryption_privkey );
                     var encrypted_chan_id = await super_nostr.alt_encrypt( encryption_privkey, server, chan_id );
 
-                    //send invoice to server
+                    //ask server to pay L1 address
                     var message_for_counterparty = JSON.stringify({
                         msg_type: "pay_l1_address_for_user",
-                        msg_value: {encrypted_chan_id, pmthash, encryption_pubkey},
+                        msg_value: {encrypted_chan_id, pmthash, encryption_pubkey, senders_pubkey},
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_counterparty );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
@@ -3365,10 +3368,10 @@
                         }
                         var privkey = hedgehog_client.nostr_privkey;
                         var pubkey = super_nostr.getPubkey( privkey );
-                        var counterparty_pubkey = hedgehog_client.server;
+                        var counterpartys_pubkey = hedgehog_client.server;
                         var relays = hedgehog_client.relays;
-                        var emsg = await super_nostr.alt_encrypt( privkey, counterparty_pubkey, msg_for_counterparty );
-                        var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterparty_pubkey ] ] );
+                        var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
+                        var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
                         super_nostr.sendEvent( event, relays[ 0 ] );
 
                         var loop = async () => {
@@ -3453,6 +3456,7 @@
                         var check_server_id = hedgehog_client.textToHex( JSON.stringify({
                             connection_type: "nostr",
                             connection_string: hedgehog_client.convertPubkeyAndRelaysToNprofile( "nprofile", server, relays ),
+                            network_string: hedgehog_client.network_string,
                             ln_support: hedgehog_client.ln_support,
                         }) );
                         var channel_fee_data = {}
@@ -3647,10 +3651,114 @@
                                             var { check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey } = check_data;
                                             hedgehog_client.cashCheck( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey );
                                         }
-                                        $( '.check_to_l1' ).onclick = () => {
-                                            showModal( `This button doesn't do anything yet` );
+                                        $( '.check_to_l1' ).onclick = async () => {
+                                            destino = prompt( `enter a bitcoin address you want to send money to` );
+                                            if ( !destino ) return;
+                                            if ( !hedgehog.isValidAddress( destino ) ) return alert( 'that is not a valid bitcoin address' );
+                                            var check_hex = hedgehog_client.textToHex( check.content );
+                                            var check_data = JSON.parse( hedgehog_client.hexToText( check_hex ) );
+                                            var { check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey } = check_data;
+
+                                            //ensure user is okay with swap fee
+                                            //TODO: get swap fee from server
+                                            var swap_fee = 500;
+                                            //TODO: get an L1 fee estimate from the mempool
+                                            var L1_fee = 500;
+                                            var amnt = check_amount - swap_fee - L1_fee;
+                                            var conf = confirm( `this check is worth ${check_amount} sats, but due to needing to pay ${swap_fee + L1_fee} sats in swap fees, you will only get ${check_amount - swap_fee - L1_fee} sats. Click ok if are okay with that or click cancel if you don't want to do this anymore` );
+                                            if ( !conf ) return;
+
+                                            //prepare to talk to the server
+                                            var server_info = JSON.parse( hedgehog_client.hexToText( check_server_id ) );
+                                            if ( server_info.connection_type === "nostr" ) {
+                                                //prepare the swap
+                                                var privkey = super_nostr.getPrivkey();
+                                                var pubkey = super_nostr.getPubkey( privkey );
+                                                var { connection_string, network_string } = server_info;
+                                                var [ server, relays ] = hedgehog_client.convertNEvent( connection_string );
+                                                var preimage = check_preimage;
+                                                var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
+
+                                                //ask server to pay L1 address
+                                                var senders_privkey = hedgehog.getPrivkey();
+                                                var senders_pubkey = hedgehog.getPubkey( senders_privkey );
+                                                var message_for_counterparty = JSON.stringify({
+                                                    msg_type: "pay_l1_address_for_user",
+                                                    msg_value: {encrypted_chan_id: check_encrypted_chan_id, pmthash, encryption_pubkey: check_encryption_pubkey, senders_pubkey},
+                                                });
+                                                var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_counterparty );
+                                                var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
+                                                super_nostr.sendEvent( event, relays[ 0 ] );
+
+                                                //get the htlc address
+                                                var alice_wants_htlc = true;
+                                                var relative_timelock = 10;
+                                                var senders_pubkey = hedgehog.getPubkey( senders_privkey );
+                                                var counterpartys_pubkey = server;
+                                                var htlc_scripts = hedgehog.getStandardHTLCScripts( senders_pubkey, counterpartys_pubkey, pmthash, relative_timelock );
+                                                var [ htlc_addy, htlc_tree, htlc_cblock ] = hedgehog.getAddressData( htlc_scripts, 0 );
+
+                                                //check if the htlc got funded
+                                                var my_network = network_string.split( "," );
+                                                var loop = async () => {
+                                                    console.log( `checking if htlc got funded: ${htlc_addy}` );
+                                                    var utxos = await chain_client.commander( my_network, "utxos", htlc_addy );
+                                                    var sum_of_utxos = 0;
+                                                    utxos.forEach( utxo => sum_of_utxos = sum_of_utxos + utxo.value );
+                                                    if ( sum_of_utxos >= amnt + L1_fee ) return utxos;
+                                                    await super_nostr.waitSomeSeconds( 1 );
+                                                    return loop();
+                                                }
+                                                //TODO: force close if the htlc is not funded in a timely manner and you don't get some sort of error message from the server
+                                                var htlc_addy_got_funded = await loop();
+
+                                                //ask the user if they want to wait for a confirmation
+                                                var wait_for_conf = confirm( `the server funded a swap address and wants you to resolve your htlc, but, unless you trust the server, it is not safe to do so til their tx confirms, otherwise the server can doublespend. Click ok to wait for a confirmation or click cancel if you trust the server enough to resolve the htlc now` );
+                                                if ( wait_for_conf ) {
+                                                    //TODO: automate waiting for confirmations
+                                                    var htlc_utxos = htlc_addy_got_funded;
+                                                    var msg = `click ok when these transactions all confirm:`;
+                                                    htlc_utxos.forEach( utxo => msg += `\n${utxo.txid}` );
+                                                    alert( msg );
+                                                }
+
+                                                //prepare the sweep tx
+                                                var utxos_to_sweep = htlc_addy_got_funded;
+                                                var sum_of_utxos = 0;
+                                                var vin = [];
+                                                utxos_to_sweep.forEach( utxo => {
+                                                    sum_of_utxos = sum_of_utxos + utxo.value;
+                                                    vin.push({
+                                                        txid: utxo.txid,
+                                                        vout: utxo.vout,
+                                                        prevout: {
+                                                            value: utxo.value,
+                                                            scriptPubKey: tapscript.Address.toScriptPubKey( htlc_addy ),
+                                                        },
+                                                    });
+                                                });
+                                                var sweep_tx = tapscript.Tx.create({
+                                                    vin,
+                                                    vout: [{
+                                                        value: sum_of_utxos - L1_fee,
+                                                        scriptPubKey: tapscript.Address.toScriptPubKey( destino ),
+                                                    }],
+                                                });
+
+                                                //sign the sweep tx
+                                                vin.forEach( ( _, index ) => {
+                                                    var sig = tapscript.Signer.taproot.sign( senders_privkey, sweep_tx, index, {extension: htlc_tree[ 0 ] }).hex;
+                                                    sweep_tx.vin[ index ].witness = [ sig, preimage, htlc_scripts[ 0 ], htlc_cblock ];
+                                                });
+
+                                                //broadcast the sweep tx
+                                                var txhex = tapscript.Tx.encode( sweep_tx ).hex;
+                                                console.log( 'broadcast this:', txhex );
+                                                console.log( `you can broadcast the tx like this:` );
+                                                console.log( `var my_network = "${network_string}".split( "," );chain_client.commander( my_network, "broadcast", "${txhex}" )` );
+                                            }
                                         }
-                                        if ( $( '.check_to_ln' ) ) $( '.check_to_ln' ).onclick = () => {
+                                        if ( $( '.check_to_ln' ) ) $( '.check_to_ln' ).onclick = async () => {
                                             showModal( `This button doesn't do anything yet` );
                                         }
                                     } else {
@@ -3686,13 +3794,13 @@
 
                     //ensure check is redeemable
                     var nostr_relays = relays;
-                    var counterparty_pubkey = server;
+                    var counterpartys_pubkey = server;
                     var msg_for_counterparty = JSON.stringify({
                         msg_type: "get_check_status",
                         msg_value: { encrypted_chan_id, check_pmthash, check_amnt, encryption_pubkey, check_absolute_timelock },
                     });
-                    var emsg = await super_nostr.alt_encrypt( privkey, counterparty_pubkey, msg_for_counterparty );
-                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterparty_pubkey ] ] );
+                    var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
+                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
                     super_nostr.sendEvent( event, nostr_relays[ 0 ] );
                 },
                 cashCheck: async ( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey ) => {
