@@ -155,15 +155,10 @@
                         [ sweepers_pub, "OP_CHECKSIGVERIFY", relative_timelock, "OP_CHECKSEQUENCEVERIFY" ],
                     ];
                 },
-                getStandardHTLCScripts: ( chan_id, alice_wants_htlc, pmthash, relative_timelock ) => {
-                    var state = hedgehog.state[ chan_id ];
-                    var am_alice = !!state.alices_priv;
-                    var senders_pub = alice_wants_htlc ? state.alices_pub : state.bobs_pub;
-                    var counterpartys_pub = alice_wants_htlc ? state.bobs_pub : state.alices_pub;
-
+                getStandardHTLCScripts: ( senders_pubkey, counterpartys_pubkey, pmthash, relative_timelock ) => {
                     return [
-                        [ "OP_SIZE", 32, "OP_EQUALVERIFY", "OP_SHA256", pmthash, "OP_EQUALVERIFY", senders_pub, "OP_CHECKSIG" ],
-                        [ relative_timelock, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", counterpartys_pub, "OP_CHECKSIG" ],
+                        [ "OP_SIZE", 32, "OP_EQUALVERIFY", "OP_SHA256", pmthash, "OP_EQUALVERIFY", senders_pubkey, "OP_CHECKSIG" ],
+                        [ relative_timelock, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", counterpartys_pubkey, "OP_CHECKSIG" ],
                     ];
                 },
                 getRevocableScripts: ( chan_id, sender_is_revoker, am_sender, revhash ) => {
@@ -2138,6 +2133,8 @@
                 channels_with_htlcs_that_need_resolving: {},
                 pmthashes_with_htlcs_that_need_resolving: {},
                 utxos: {},
+                nostr_privkey: null,
+                nostr_pubkey: null,
                 isValidHex: hex => {
                     if ( !hex ) return;
                     var length = hex.length;
@@ -2183,7 +2180,7 @@
                             if ( json.msg_type === "two_way_comms" ) {
                                 var msg_id = json.msg_value.message_identifier;
                                 var privkey = hedgehog_server.nostr_privkey;
-                                var counterparty_pubkey = event.pubkey;
+                                var counterpartys_pubkey = event.pubkey;
                                 if ( json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "htlc_to_server_part_one" ) {
 
                                     //parse the message from the user
@@ -2197,8 +2194,8 @@
                                         msg_type: "two_way_comms",
                                         msg_value: {message_identifier: msg_id, data_for_counterparty: my_revhashes, more_message_info: "htlc_to_server_part_two"},
                                     });
-                                    var emsg = await super_nostr.alt_encrypt( privkey, counterparty_pubkey, msg_for_counterparty );
-                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterparty_pubkey ] ] );
+                                    var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
+                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
                                     super_nostr.sendEvent( event, nostr_relays[ 0 ] );
 
                                     return;
@@ -2215,8 +2212,8 @@
                                         msg_type: "two_way_comms",
                                         msg_value: {message_identifier: msg_id, data_for_counterparty, more_message_info: "htlc_to_server_part_four"},
                                     });
-                                    var emsg = await super_nostr.alt_encrypt( privkey, counterparty_pubkey, msg_for_counterparty );
-                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterparty_pubkey ] ] );
+                                    var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
+                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
                                     super_nostr.sendEvent( event, nostr_relays[ 0 ] );
                                 }
 
@@ -2232,8 +2229,8 @@
                                         msg_type: "two_way_comms",
                                         msg_value: {message_identifier: msg_id, data_for_counterparty, more_message_info: "htlc_to_server_part_six"},
                                     });
-                                    var emsg = await super_nostr.alt_encrypt( privkey, counterparty_pubkey, msg_for_counterparty );
-                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterparty_pubkey ] ] );
+                                    var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
+                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
                                     super_nostr.sendEvent( event, nostr_relays[ 0 ] );
                                 }
 
@@ -2244,7 +2241,7 @@
                                 //prepare requisite variables
                                 var { encrypted_chan_id, check_pmthash, check_amnt, encryption_pubkey, check_absolute_timelock } = json.msg_value;
                                 var privkey = hedgehog_server.nostr_privkey;
-                                var counterparty_pubkey = event.pubkey;
+                                var counterpartys_pubkey = event.pubkey;
                                 var chan_id = await super_nostr.alt_decrypt( privkey, encryption_pubkey, encrypted_chan_id );
                                 chan_id = "b_" + chan_id.substring( 2 );
                                 var error = null;
@@ -2284,8 +2281,8 @@
                                     msg_type: "get_check_status_reply",
                                     msg_value: error || "redeemable",
                                 });
-                                var emsg = await super_nostr.alt_encrypt( privkey, counterparty_pubkey, msg_for_counterparty );
-                                var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterparty_pubkey ] ] );
+                                var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
+                                var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
                                 super_nostr.sendEvent( event, nostr_relays[ 0 ] );
                             }
                             if ( json.msg_type === "pay_ln_invoice_for_user" ) {
@@ -2368,7 +2365,7 @@
                             }
                             if ( json.msg_type === "pay_l1_address_for_user" ) {
                                 //prepare requisite variables
-                                var { encrypted_chan_id, pmthash, encryption_pubkey } = json.msg_value;
+                                var { encrypted_chan_id, pmthash, encryption_pubkey, senders_pubkey } = json.msg_value;
                                 var privkey = hedgehog_server.nostr_privkey;
                                 var user_pubkey = event.pubkey;
                                 var chan_id = await super_nostr.alt_decrypt( privkey, encryption_pubkey, encrypted_chan_id );
@@ -2400,7 +2397,9 @@
                                 //prepare an L1 htlc with the user's payment hash, such that the user can sweep the htlc if and only if they reveal the preimage, otherwise you get the money back after a 10 block timelock
                                 var alice_wants_htlc = true;
                                 var relative_timelock = 10;
-                                var htlc_scripts = hedgehog.getStandardHTLCScripts( chan_id, alice_wants_htlc, pmthash, relative_timelock );
+                                var counterpartys_privkey = hedgehog_server.nostr_privkey;
+                                var counterpartys_pubkey = hedgehog_server.nostr_pubkey;
+                                var htlc_scripts = hedgehog.getStandardHTLCScripts( senders_pubkey, counterpartys_pubkey, pmthash, relative_timelock );
                                 var [ htlc_addy, htlc_tree, htlc_cblock ] = hedgehog.getAddressData( htlc_scripts, 1 );
 
                                 //fund the htlc
@@ -3341,15 +3340,15 @@
                 },
                 askCounterpartyToResolveHtlc: async ( chan_id, preimage ) => {
                     var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
-                    var counterparty_pubkey = hedgehog_server.comms_keys[ chan_id ][ 0 ];
-                    if ( !counterparty_pubkey ) return console.log( 'cannot ask that counterparty -- no nostr pubkey on file' );
+                    var counterpartys_pubkey = hedgehog_server.comms_keys[ chan_id ][ 0 ];
+                    if ( !counterpartys_pubkey ) return console.log( 'cannot ask that counterparty -- no nostr pubkey on file' );
                     var privkey = hedgehog_server.nostr_privkey;
                     var msg_for_counterparty = JSON.stringify({
                         msg_type: "resolve_htlc_to_server_part_one",
                         msg_value: {preimage, chan_id},
                     });
-                    var emsg = await super_nostr.alt_encrypt( privkey, counterparty_pubkey, msg_for_counterparty );
-                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterparty_pubkey ] ] );
+                    var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
+                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
                     super_nostr.sendEvent( event, nostr_relays[ 0 ] );
                 },
                 asyncResolvingLoop: async () => {
@@ -3536,6 +3535,7 @@
             var server_id = hedgehog_server.textToHex( JSON.stringify({
                 connection_type: "nostr",
                 connection_string: hedgehog_server.convertPubkeyAndRelaysToNprofile( "nprofile", hedgehog_server.nostr_pubkey, nostr_relays ),
+                network_string,
                 ln_support: false,
             }) );
             init();
