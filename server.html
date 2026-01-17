@@ -992,7 +992,7 @@
                     var sender_is_funder = true;
                     var sender_is_revoker = true;
                     var data_for_recipient = { chan_id, pmthash, s_midstate_revhash };
-                    var recipients_revhashes = await hedgehog.communicateWithUser( data_for_recipient );
+                    var recipients_revhashes = await hedgehog.intercom( data_for_recipient );
                     // var recipients_revhashes = await hedgehog.receiveHtlcPartOne( data_for_recipient );
                     var extra_outputs = [];
                     var latest_state = state.channel_states[ state.channel_states.length - 1 ];
@@ -1066,7 +1066,7 @@
                     data_for_counterparty[ "htlc_sigs" ] = htlc_sigs;
 
                     //send the data object to your counterparty
-                    var reply_from_counterparty = await hedgehog.communicateWithUser( data_for_counterparty );
+                    var reply_from_counterparty = await hedgehog.intercom( data_for_counterparty );
                     // var reply_from_counterparty = await hedgehog.receiveHtlcPartTwo( data_for_counterparty );
 
                     //TODO: force close if the following error is thrown
@@ -1253,7 +1253,7 @@
 
                     //send the data to your counterparty and get their revocation preimage
                     //TODO: force close if the recipient does not reply in a timely manner
-                    var data_from_recipient = await hedgehog.communicateWithUser( obj );
+                    var data_from_recipient = await hedgehog.intercom( obj );
                     // var data_from_recipient = await hedgehog.receiveHtlcPartThree( obj );
 
                     //validate and store it
@@ -2120,7 +2120,7 @@
                     console.log( a_force );
                     console.log( 'note that in the above example, it is okay for test8 and test9 to be undefined because we did not run test8 or test9, which are only relevant when Bob initiates a force closure' );
                 },
-                communicateWithUser: async data_for_user => {
+                intercom: async data_for_user => {
                     throw( 'batteries not included -- you are supposed to overwrite this function with something that *actually* communicates with the user' );
                 },
             }
@@ -2135,6 +2135,11 @@
                 utxos: {},
                 nostr_privkey: null,
                 nostr_pubkey: null,
+                utxos_privkey: null,
+                utxos_pubkey: null,
+                utxos_addy: null,
+                use_rest: true,
+                rest_endpoint: "http://localhost:8080",
                 isValidHex: hex => {
                     if ( !hex ) return;
                     var length = hex.length;
@@ -2149,16 +2154,7 @@
                     var padding = prepad.slice( -Math.abs( length ) );
                     return ( padding === hex );
                 },
-                listenOnNostr: async ( nostr_pubkey, network_string ) => {
-                    var listenFunction = async socket => {
-                        var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
-                        var filter  = {}
-                        filter.kinds = [ 4 ];
-                        filter[ "#p" ] = [ nostr_pubkey ];
-                        filter.since = Math.floor( Date.now() / 1000 );
-                        var subscription = [ "REQ", subId, filter ];
-                        socket.send( JSON.stringify( subscription ) );
-                    }
+                listenForComms: async ( nostr_pubkey, network_string ) => {
                     var handleFunction = async message => {
                         var [ type, subId, event ] = JSON.parse( message.data );
                         if ( !event || event === true ) return;
@@ -2196,7 +2192,7 @@
                                     });
                                     var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
                                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
-                                    super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                    hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
 
                                     return;
                                 }
@@ -2214,7 +2210,7 @@
                                     });
                                     var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
                                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
-                                    super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                    hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
                                 }
 
                                 if ( json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "htlc_to_server_part_five" ) {
@@ -2231,7 +2227,7 @@
                                     });
                                     var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
                                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
-                                    super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                    hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
                                 }
 
                                 hedgehog_server.two_way_comms[ msg_id ] = json.msg_value.data_for_server;
@@ -2283,7 +2279,7 @@
                                 });
                                 var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
-                                super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
                             }
                             if ( json.msg_type === "pay_ln_invoice_for_user" ) {
                                 //prepare requisite variables
@@ -2418,7 +2414,7 @@
                                     var utxos = await chain_client.commander( my_network, "utxos", htlc_addy );
                                     var sum_of_utxos = 0;
                                     utxos.forEach( utxo => sum_of_utxos = sum_of_utxos + utxo.value );
-                                    if ( sum_of_utxos >= htlc_amnt ) return;
+                                    if ( sum_of_utxos >= htlc_amnt ) return utxos;
                                     await super_nostr.waitSomeSeconds( 1 );
                                     return loop();
                                 }
@@ -2429,9 +2425,54 @@
                                 await hedgehog_server.waitSomeTime( 100 );
                                 var user_swept_htlc = confirm( `click ok if the user swept the htlc, otherwise, if 10 blocks go by without them doing that, click cancel` );
                                 if ( !user_swept_htlc ) {
-                                    //TODO: force close
-                                    //TODO: prepare and broadcast a sweep tx
-                                    //TODO: in case the user initiates a race condition after you broadcast your sweep tx (by broadcasting one of their own), continue to watch the mempool and the block for their preimage until your tx has 3 confirmations, and if you see their preimage, use it to take the money from the htlc created by your force close transaction
+                                    //NOTE: I do not want to necessarily force close because you don't know if it's entirely the channel owner's fault, maybe they sent a check to someone and *that* person trolled the server
+                                    //TODO: consider issuing some sort of reimbursement request to the channel owner, telling them that either *they* trolled the server or *someone they sent a check to* trolled the server; then embargo that channel until they reimburse you, and force close if they take too long
+                                    
+                                    //prepare a sweep tx
+                                    //TODO: get an L1 fee estimate from the mempool
+                                    var L1_fee = 500;
+                                    var destino = hedgehog_server.utxos_addy;
+                                    var utxos_to_sweep = htlc_addy_got_funded;
+                                    var sum_of_utxos = 0;
+                                    var vin = [];
+                                    utxos_to_sweep.forEach( utxo => {
+                                        sum_of_utxos = sum_of_utxos + utxo.value;
+                                        vin.push({
+                                            txid: utxo.txid,
+                                            vout: utxo.vout,
+                                            sequence: relative_timelock,
+                                            prevout: {
+                                                value: utxo.value,
+                                                scriptPubKey: tapscript.Address.toScriptPubKey( htlc_addy ),
+                                            },
+                                        });
+                                    });
+                                    var sweep_tx = tapscript.Tx.create({
+                                        vin,
+                                        vout: [{
+                                            value: sum_of_utxos - L1_fee,
+                                            scriptPubKey: tapscript.Address.toScriptPubKey( destino ),
+                                        }],
+                                    });
+
+                                    //sign the sweep tx
+                                    vin.forEach( ( _, index ) => {
+                                        var sig = tapscript.Signer.taproot.sign( counterpartys_privkey, sweep_tx, index, {extension: htlc_tree[ 1 ] }).hex;
+                                        sweep_tx.vin[ index ].witness = [ sig, htlc_scripts[ 1 ], htlc_cblock ];
+                                    });
+
+                                    //wait for 10 confirmations
+                                    var txhex = tapscript.Tx.encode( sweep_tx ).hex;
+                                    var msg = `wait til all of these txs confirm:`;
+                                    var msg = `click ok when these transactions all have 10 confirmations:`;
+                                    utxos_to_sweep.forEach( utxo => msg += `\n${utxo.txid}` );
+
+                                    //broadcast the sweep tx
+                                    console.log( 'broadcast this:', txhex );
+                                    console.log( `you can broadcast the tx like this:` );
+                                    console.log( `var my_network = "${network_string}".split( "," );chain_client.commander( my_network, "broadcast", "${txhex}" )` );
+
+                                    //TODO: in case the user initiates a race condition after you broadcast your sweep tx (by broadcasting one of their own), continue to watch the mempool and the block for their preimage until your sweep tx has 3 confirmations, and if you see their preimage, use it to take the money from the htlc created by your force close transaction
                                     return;
                                 }
 
@@ -2663,12 +2704,11 @@
                                     msg_type: "channel_request_reply",
                                     msg_value: hedgehog_server.data_for_channel_opens[ event.pubkey ],
                                 });
-                                console.log( 'replying:', message_for_user );
                                 var privkey = hedgehog_server.nostr_privkey;
                                 var pubkey = nostr_pubkey;
                                 var emsg = await super_nostr.alt_encrypt( privkey, event.pubkey, message_for_user );
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", event.pubkey ] ] );
-                                super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
                                 return;
                             }
                             if ( json.msg_type === "channel_init" ) {
@@ -2736,13 +2776,12 @@
                                         msg_type: "channel_init_reply",
                                         msg_value: 'fee invoice is paid',
                                     });
-                                    console.log( 'replying:', message_for_user );
                                     var privkey = hedgehog_server.nostr_privkey;
                                     var pubkey = nostr_pubkey;
                                     var user_pubkey = event.pubkey;
                                     var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
                                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", event.pubkey ] ] );
-                                    super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                    hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
                                 }
 
                                 //broadcast the tx
@@ -2852,10 +2891,9 @@
                                     msg_type: "swap_address_for_user",
                                     msg_value: {swap_address},
                                 });
-                                console.log( 'replying:', message_for_user );
                                 var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
-                                super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
 
                                 //wait til swap address is funded
                                 var my_network = network_string.split( "," );
@@ -2876,10 +2914,9 @@
                                     msg_type: "swap_address_funded",
                                     msg_value: 'swap address is funded',
                                 });
-                                console.log( 'replying:', message_for_user );
                                 var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
-                                super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
 
                                 //inside the hedgehog channel, send the user an htlc with these properties: it is worth the same amount as the amount in the swap address, minus a mining fee and the channel cost; it is locked to the same payment hash as the swap address; and it has a cltv below the swap address's
                                 var relative_timelock = 20;
@@ -2934,10 +2971,9 @@
                                     msg_type: "ln_invoice_for_user",
                                     msg_value: {ln_invoice},
                                 });
-                                console.log( 'replying:', message_for_user );
                                 var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
-                                super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
 
                                 //wait til ln invoice is pending
                                 var loop = async () => {
@@ -2965,10 +3001,9 @@
                                     msg_type: "ln_invoice_paid",
                                     msg_value: 'ln invoice is paid',
                                 });
-                                console.log( 'replying:', message_for_user );
                                 var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
-                                super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
 
                                 //inside the hedgehog channel, send the user an htlc with these properties: it is worth the same amount as the full hodl invoice, minus a mining fee and the channel cost; it is locked to the same payment hash as the ln invoice; and it has a cltv below the hodl invoice's
                                 var relative_timelock = 20;
@@ -3069,10 +3104,9 @@
                                     msg_type: "resolve_htlc_to_user_part_two",
                                     msg_value: {...object_for_counterparty, message_identifier},
                                 });
-                                console.log( 'replying:', message_for_user );
                                 var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
-                                super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
 
                                 //TODO: if your counterparty does not reply in a few seconds, force close
                                 //get the next message from your counterparty
@@ -3103,10 +3137,9 @@
                                     msg_type: "resolve_htlc_to_user_part_four",
                                     msg_value: {...state_update, s_midstate_rev_preimage: htlc_to_remove.s_midstate_rev_preimage, s_recovery_p2_rev_preimage: htlc_to_remove.s_recovery_p2_rev_preimage},
                                 });
-                                console.log( 'replying:', message_for_user );
                                 var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
-                                super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
 
                                 //TODO: if your counterparty does not reply in a few seconds, force close
                                 //ensure your counterparty sent you their reveal-path revocation preimage, their htlc midstate rev_preimage
@@ -3198,7 +3231,7 @@
                                 });
                                 var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, msg_for_counterparty );
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
-                                super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
 
                                 //TODO: if your counterparty does not reply in a few seconds, force close
                                 //get counterparty's revocations
@@ -3245,7 +3278,7 @@
                                 });
                                 var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, msg_for_counterparty );
                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
-                                super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                                hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
 
                                 //remove the preimage from the list of htlcs to resolve
                                 if ( hedgehog_server.channels_with_htlcs_that_need_resolving.hasOwnProperty( chan_id ) && hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].indexOf( preimage ) > -1 ) hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].splice( hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].indexOf( preimage ), 1 );
@@ -3259,6 +3292,35 @@
                         catch ( e ) {
                             console.log( e );
                         }
+                    }
+                    if ( hedgehog_server.use_rest ) {
+                        var loop = async () => {
+                            var admins_privkey = hedgehog_server.nostr_privkey;
+                            var pubkey = super_nostr.getPubkey( admins_privkey );
+                            var sig = await nobleSecp256k1.schnorr.sign( "a".repeat( 64 ), admins_privkey );
+                            var data = await fetch( hedgehog_server.rest_endpoint + "/read", {
+                                method: "POST",
+                                headers: {
+                                    "Content-type": "application/json"
+                                },
+                                body: JSON.stringify({sig, pubkey}),
+                            });
+                            var json = await data.json();
+                            json.forEach( item => handleFunction({ data: JSON.stringify( [ null, null, item ] )}) );
+                            await hedgehog_server.waitSomeTime( 1_000 );
+                            return loop();
+                        }
+                        loop();
+                        return;
+                    }
+                    var listenFunction = async socket => {
+                        var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
+                        var filter  = {}
+                        filter.kinds = [ 4 ];
+                        filter[ "#p" ] = [ nostr_pubkey ];
+                        filter.since = Math.floor( Date.now() / 1000 );
+                        var subscription = [ "REQ", subId, filter ];
+                        socket.send( JSON.stringify( subscription ) );
                     }
                     var connection = await super_nostr.newPermanentConnection( nostr_relays[ 0 ], listenFunction, handleFunction );
                     return connection;
@@ -3302,7 +3364,7 @@
                     return super_nostr.bytesToHex( new Uint8Array( priv_as_array ) );
                 },
                 setUpComms: async () => {
-                    hedgehog.communicateWithUser = async data_for_user => {
+                    hedgehog.intercom = async data_for_user => {
                         var chan_id = data_for_user.chan_id;
                         var message_identifier = hedgehog.getPrivkey();
                         data_for_user[ "message_identifier" ] = message_identifier;
@@ -3315,7 +3377,7 @@
                         var user_pubkey = hedgehog_server.comms_keys[ chan_id ][ 0 ];
                         var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
                         var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
-                        super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                        hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
 
                         var loop = async () => {
                             await hedgehog_server.waitSomeTime( 100 );
@@ -3349,7 +3411,7 @@
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
-                    super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                    hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
                 },
                 asyncResolvingLoop: async () => {
                     console.log( 'time to resolve!' );
@@ -3426,6 +3488,17 @@
                     await hedgehog_server.waitSomeTime( 9_000 );
                     hedgehog_server.asyncResolvingLoop();
                 },
+                sendEvent: async ( event, relay ) => {
+                    if ( !hedgehog_server.use_rest ) {
+                        super_nostr.sendEvent( event, relay );
+                        return;
+                    }
+                    fetch( hedgehog_server.rest_endpoint + "/write", {
+                        method: "POST",
+                        headers: {"Content-type": "application/json"},
+                        body: JSON.stringify( event ),
+                    });
+                },
             }
         </script>
         <style>
@@ -3483,6 +3556,7 @@
     <body>
         <h1>Hedgehog Server</h1>
         <script>
+            var blockchain = null;
             var init = async() => {
                 console.log( 'setting up testnet...' );
                 var promiseA = async () => {
@@ -3495,17 +3569,18 @@
                 var reply = await Promise.any( [ promiseA(), promiseB() ] );
                 if ( reply === "timed out" ) return alert( `could not connect to nostr relay, try again` );
                 var [ network_privkey, network_string ] = reply;
+                blockchain = network_string;
                 console.log( 'testnet is set up!' );
                 console.log( 'getting coins...' );
                 var blockhash = await chain_client.commander( network_string.split( "," ), "genblock" );
-                var utxos_privkey = super_nostr.getPrivkey();
-                var utxos_pubkey = super_nostr.getPubkey( utxos_privkey );
-                var utxos_addy = tapscript.Address.fromScriptPubKey( [ 1, utxos_pubkey ], hedgehog.network );
+                hedgehog_server.utxos_privkey = super_nostr.getPrivkey();
+                hedgehog_server.utxos_pubkey = super_nostr.getPubkey( hedgehog_server.utxos_privkey );
+                hedgehog_server.utxos_addy = tapscript.Address.fromScriptPubKey( [ 1, hedgehog_server.utxos_pubkey ], hedgehog.network );
                 var amnt = 500_000;
-                var txhex = await chain_client.commander( network_string.split( "," ), "send", {destino: utxos_addy, amnt, feerate: 1} );
+                var txhex = await chain_client.commander( network_string.split( "," ), "send", {destino: hedgehog_server.utxos_addy, amnt, feerate: 1} );
                 var vout = -1;
                 tapscript.Tx.decode( txhex ).vout.every( ( output, index ) => {
-                    if ( Number( output.value ) !== amnt || tapscript.Address.fromScriptPubKey( output.scriptPubKey, hedgehog.network ) !== utxos_addy ) return true;
+                    if ( Number( output.value ) !== amnt || tapscript.Address.fromScriptPubKey( output.scriptPubKey, hedgehog.network ) !== hedgehog_server.utxos_addy ) return true;
                     vout = index;
                 });
                 var utxo_id = "u_" + super_nostr.getPrivkey().substring( 0, 16 );
@@ -3513,14 +3588,14 @@
                     utxo_id,
                     txid: tapscript.Tx.util.getTxid( txhex ),
                     vout,
-                    addy: utxos_addy,
-                    skey: utxos_privkey,
+                    addy: hedgehog_server.utxos_addy,
+                    skey: hedgehog_server.utxos_privkey,
                     amnt,
                 }
                 console.log( 'blockhash:', blockhash, 'txhex:', txhex );
                 console.log( 'success! You have 500_000 sats' );
                 hedgehog_server.setUpComms();
-                var connection = await hedgehog_server.listenOnNostr( hedgehog_server.nostr_pubkey, network_string );
+                var connection = await hedgehog_server.listenForComms( hedgehog_server.nostr_pubkey, network_string );
                 hedgehog_server.asyncResolvingLoop();
                 console.log( 'server id:' );
                 console.log( server_id );
@@ -3530,13 +3605,17 @@
             var minimum_channel_capacity = 80_000;
             var inbound_capacity_fee = 330; //if you set a fee of 1 and set 'absolute' below, you will charge 1 sat per channel regardless of its size; if you set a fee of 1 and set 'percent' below, you will charge 1% of the channel capacity instead
             var inbound_capacity_fee_type = 'absolute'; //can be 'absolute' or change to 'percent'
-            hedgehog_server.nostr_privkey = super_nostr.getPrivkey();
+            // hedgehog_server.nostr_privkey = super_nostr.getPrivkey();
+            //TODO: do not hard-code this nostr privkey; the server should make one at random and then set their rest server, if any, to use it
+            hedgehog_server.nostr_privkey = "93227dfc17a3a80ff230dd7a95b6d024bffa1d89cf263b9bf3e2311af6ae265f";
             hedgehog_server.nostr_pubkey = super_nostr.getPubkey( hedgehog_server.nostr_privkey );
             var server_id = hedgehog_server.textToHex( JSON.stringify({
                 connection_type: "nostr",
                 connection_string: hedgehog_server.convertPubkeyAndRelaysToNprofile( "nprofile", hedgehog_server.nostr_pubkey, nostr_relays ),
-                network_string,
+                network_string: blockchain,
                 ln_support: false,
+                use_rest: hedgehog_server.use_rest,
+                rest_endpoint: hedgehog_server.use_rest ? hedgehog_server.rest_endpoint : undefined,
             }) );
             init();
         </script>
