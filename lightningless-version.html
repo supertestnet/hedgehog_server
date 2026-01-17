@@ -997,7 +997,7 @@
                     var sender_is_funder = true;
                     var sender_is_revoker = true;
                     var data_for_recipient = { chan_id, pmthash, s_midstate_revhash };
-                    var recipients_revhashes = await hedgehog.communicateWithUser( data_for_recipient );
+                    var recipients_revhashes = await hedgehog.intercom( data_for_recipient );
                     // var recipients_revhashes = await hedgehog.receiveHtlcPartOne( data_for_recipient );
                     var extra_outputs = [];
                     var latest_state = state.channel_states[ state.channel_states.length - 1 ];
@@ -1071,7 +1071,7 @@
                     data_for_counterparty[ "htlc_sigs" ] = htlc_sigs;
 
                     //send the data object to your counterparty
-                    var reply_from_counterparty = await hedgehog.communicateWithUser( data_for_counterparty );
+                    var reply_from_counterparty = await hedgehog.intercom( data_for_counterparty );
                     // var reply_from_counterparty = await hedgehog.receiveHtlcPartTwo( data_for_counterparty );
 
                     //TODO: force close if the following error is thrown
@@ -1258,7 +1258,7 @@
 
                     //send the data to your counterparty and get their revocation preimage
                     //TODO: force close if the recipient does not reply in a timely manner
-                    var data_from_recipient = await hedgehog.communicateWithUser( obj );
+                    var data_from_recipient = await hedgehog.intercom( obj );
                     // var data_from_recipient = await hedgehog.receiveHtlcPartThree( obj );
 
                     //validate and store it
@@ -2125,7 +2125,7 @@
                     console.log( a_force );
                     console.log( 'note that in the above example, it is okay for test8 and test9 to be undefined because we did not run test8 or test9, which are only relevant when Bob initiates a force closure' );
                 },
-                communicateWithUser: async data_for_user => {
+                intercom: async data_for_user => {
                     throw( 'batteries not included -- you are supposed to overwrite this function with something that *actually* communicates with the user' );
                 },
             }
@@ -2144,6 +2144,8 @@
                 checks: {},
                 num_of_checks: 0,
                 ln_support: "unknown",
+                use_rest: "unknown",
+                rest_endpoint: null,
                 showPage: page => {
                     $( '.welcome_page' ).classList.add( "hidden" );
                     $( '.wallet_page' ).classList.add( "hidden" );
@@ -2235,8 +2237,10 @@
                     if ( url_params.server_id && !hedgehog_client.server ) {
                         var server_id = url_params.server_id;
                         var server_info = JSON.parse( hedgehog_client.hexToText( server_id ) );
-                        var { connection_string, connection_type, ln_support } = server_info;
+                        var { connection_string, connection_type, ln_support, use_rest, rest_endpoint } = server_info;
                         hedgehog_client.ln_support = ln_support;
+                        hedgehog_client.use_rest = use_rest;
+                        if ( use_rest ) hedgehog_client.rest_endpoint = rest_endpoint;
                         if ( connection_type === "nostr" ) {
                             var [ server, relays ] = hedgehog_client.convertNEvent( connection_string );
                             hedgehog_client.server = server;
@@ -2244,7 +2248,7 @@
                         }
                     }
                     //TODO: load data from the nostr relays in your backup string so that you know what relays the server uses, which should be stored there
-                    await hedgehog_client.listenOnNostr();
+                    await hedgehog_client.listenForComms();
                     if ( check_hex ) {
                         url_params.check_hex = check_hex;
                         var check_data = JSON.parse( hedgehog_client.hexToText( check_hex ) );
@@ -2323,7 +2327,7 @@
                         return;
                     }
                     var socket = super_nostr.sockets[ socket_id ].socket;
-                    // super_nostr.sendEvent( event, socket );
+                    // hedgehog_client.sendEvent( event, socket );
                     localStorage.hedgehog_client_state = JSON.stringify( event );
                     hedgehog_client.uploadStateLoop();
                 },
@@ -2405,7 +2409,7 @@
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                     hedgehog_client.makeJITChannelPartTwo( privkey, amount, skip_channel_payment );
-                    super_nostr.sendEvent( event, hedgehog_client.relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, hedgehog_client.relays[ 0 ] );
                 },
                 makeJITChannelPartTwo: async ( privkey, amount, skip_channel_payment ) => {
                     //prepare the necessary variables
@@ -2499,7 +2503,7 @@
                         var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                         var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                         hedgehog_client.makeJITChannelPartThree( privkey, chan_id, fee_address, cost_of_channel, network_string, skip_channel_payment );
-                        super_nostr.sendEvent( event, relays[ 0 ] );
+                        hedgehog_client.sendEvent( event, relays[ 0 ] );
 
                         //cash check, if any
                         if ( !json.msg_value.need_fee_invoice ) modalVanish();
@@ -2575,7 +2579,7 @@
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                     // hedgehog_client.makeJITChannelPartTwo( privkey, amount );
-                    super_nostr.sendEvent( event, hedgehog_client.relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, hedgehog_client.relays[ 0 ] );
 
                     //get the message from the server
                     var message_identifier = "swap_address_for_user";
@@ -2638,7 +2642,7 @@
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                     hedgehog_client.prepToReceiveLNPartTwo( privkey, chan_id, preimage );
-                    super_nostr.sendEvent( event, relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, relays[ 0 ] );
                 },
                 prepToReceiveLNPartOne: async ( chan_id, amount, skip_to_resolution ) => {
                     //in Part One we create a preimage, get an invoice from the server matching our invoice, and have the sender pay it, knowing the server cannot settle it without our preimage; then we prepare a new state for hedgehog using its receiveHtlcPartOne method, and then we run prepToReceiveLNPartTwo. We also have a parameter called "skip_to_resolution" and if it is *not* set, we run makeJITChannelPartTwo -- it seems to be set only when a check is being redeemed, so when a check is *not* being redeemed, i.e. it's just an ordinary LN payment, we seem to always run makeJITChannelPartTwo -- which seems strange; shouldn't we only do that if we don't have enough money in inbound capacity?
@@ -2670,7 +2674,7 @@
                         var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                         var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                         hedgehog_client.makeJITChannelPartTwo( privkey, amount );
-                        super_nostr.sendEvent( event, hedgehog_client.relays[ 0 ] );
+                        hedgehog_client.sendEvent( event, hedgehog_client.relays[ 0 ] );
 
                         //get the message from the server
                         var message_identifier = "ln_invoice_for_user";
@@ -2736,7 +2740,7 @@
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                     hedgehog_client.prepToReceiveLNPartTwo( privkey, chan_id, preimage );
-                    super_nostr.sendEvent( event, relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, relays[ 0 ] );
                 },
                 prepToReceiveLNPartTwo: async ( privkey, chan_id, preimage ) => {
                     //in Part Two we prompt the server to fund our hedgehog htlc off-chain, such that we can only settle it if we reveal our preimage, and the server gets their money back otherwise; then we run prepToReceiveLNPartThree
@@ -2772,7 +2776,7 @@
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                     hedgehog_client.prepToReceiveLNPartThree( privkey, chan_id, preimage );
-                    super_nostr.sendEvent( event, relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, relays[ 0 ] );
                 },
                 prepToReceiveLNPartThree: async ( privkey, chan_id, preimage ) => {
                     //in Part Three we check if our hedgehog htlc is properly funded in off-chain manner; if so, we know we can settle it if we reveal our preimage, and we run prepToReceiveLNPartFour
@@ -2812,7 +2816,7 @@
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                     hedgehog_client.prepToReceiveLNPartFour( privkey, chan_id, preimage );
-                    super_nostr.sendEvent( event, relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, relays[ 0 ] );
                 },
                 prepToReceiveLNPartFour: async ( privkey, chan_id, preimage ) => {
                     //in Part Four we reveal our preimage to the server, hoping he responds with off-chain resolution data; if we get it, we resolve the htlc and show the user a success message
@@ -2832,7 +2836,7 @@
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
-                    super_nostr.sendEvent( event, relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, relays[ 0 ] );
 
                     //TODO: if the server does not reply in a few seconds, force close
                     //get the next message from the server
@@ -2889,7 +2893,7 @@
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
-                    super_nostr.sendEvent( event, relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, relays[ 0 ] );
 
                     //TODO: if the server does not reply in a few seconds, force close
                     //get counterparty's revocations
@@ -2935,26 +2939,16 @@
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
-                    super_nostr.sendEvent( event, relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, relays[ 0 ] );
 
                     //inform the user what's going on
                     showModal( 'received' );
                 },
-                listenOnNostr: async () => {
+                listenForComms: async () => {
                     var nostr_privkey = hedgehog_client.nostr_privkey;
                     var nostr_pubkey = super_nostr.getPubkey( nostr_privkey );
                     var nostr_relays = hedgehog_client.relays;
                     var server = hedgehog_client.server;
-                    var listenFunction = async socket => {
-                        var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
-                        var filter  = {}
-                        filter.authors = [ server ];
-                        filter.kinds = [ 4 ];
-                        filter[ "#p" ] = [ nostr_pubkey ];
-                        filter.since = Math.floor( Date.now() / 1000 );
-                        var subscription = [ "REQ", subId, filter ];
-                        socket.send( JSON.stringify( subscription ) );
-                    }
                     var handleFunction = async message => {
                         var [ type, subId, event ] = JSON.parse( message.data );
                         if ( !event || event === true ) return;
@@ -3026,6 +3020,34 @@
                         catch ( e ) {
                             console.log( e );
                         }
+                    }
+                    if ( hedgehog_client.use_rest ) {
+                        var loop = async () => {
+                            var sig = await nobleSecp256k1.schnorr.sign( "a".repeat( 64 ), nostr_privkey );
+                            var data = await fetch( hedgehog_client.rest_endpoint + "/read", {
+                                method: "POST",
+                                headers: {
+                                    "Content-type": "application/json"
+                                },
+                                body: JSON.stringify({sig, pubkey: nostr_pubkey}),
+                            });
+                            var json = await data.json();
+                            json.forEach( item => handleFunction({ data: JSON.stringify( [ null, null, item ] )}) );
+                            await hedgehog_client.waitSomeTime( 1_000 );
+                            return loop();
+                        }
+                        loop();
+                        return;
+                    }
+                    var listenFunction = async socket => {
+                        var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
+                        var filter  = {}
+                        filter.authors = [ server ];
+                        filter.kinds = [ 4 ];
+                        filter[ "#p" ] = [ nostr_pubkey ];
+                        filter.since = Math.floor( Date.now() / 1000 );
+                        var subscription = [ "REQ", subId, filter ];
+                        socket.send( JSON.stringify( subscription ) );
                     }
                     await super_nostr.newPermanentConnection( nostr_relays[ 0 ], listenFunction, handleFunction );
                 },
@@ -3204,7 +3226,7 @@
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_counterparty );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
-                    super_nostr.sendEvent( event, relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, relays[ 0 ] );
                 },
                 askServerToPayL1Address: async ( chan_id, pmthash, privkey ) => {
                     var senders_pubkey = super_nostr.getPubkey( privkey );
@@ -3223,7 +3245,7 @@
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_counterparty );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
-                    super_nostr.sendEvent( event, relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, relays[ 0 ] );
                 },
                 resolveHtlcToServer: async ( chan_id, preimage ) => {
                     var privkey = hedgehog_client.nostr_privkey;
@@ -3265,10 +3287,9 @@
                         msg_type: "resolve_htlc_to_server_part_two",
                         msg_value: {...object_for_counterparty, message_identifier},
                     });
-                    console.log( 'replying:', message_for_counterparty );
                     var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_counterparty );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
-                    super_nostr.sendEvent( event, relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, relays[ 0 ] );
 
                     //TODO: if your counterparty does not reply in a few seconds, force close
                     //get the next message from your counterparty
@@ -3299,10 +3320,9 @@
                         msg_type: "resolve_htlc_to_server_part_four",
                         msg_value: {...state_update, s_midstate_rev_preimage: htlc_to_remove.s_midstate_rev_preimage, s_recovery_p2_rev_preimage: htlc_to_remove.s_recovery_p2_rev_preimage},
                     });
-                    console.log( 'replying:', message_for_server );
                     var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
-                    super_nostr.sendEvent( event, relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, relays[ 0 ] );
 
                     //TODO: if your counterparty does not reply in a few seconds, force close
                     //ensure your counterparty sent you their reveal-path revocation preimage, their htlc midstate rev_preimage
@@ -3336,7 +3356,7 @@
                     return;
                 },
                 setUpComms: async () => {
-                    hedgehog.communicateWithUser = async data_for_counterparty => {
+                    hedgehog.intercom = async data_for_counterparty => {
                         var chan_id = data_for_counterparty.chan_id;
                         var message_identifier = hedgehog.getPrivkey();
                         if ( data_for_counterparty.hasOwnProperty( "pmthash" ) && data_for_counterparty.hasOwnProperty( "s_midstate_revhash" ) ) {
@@ -3372,7 +3392,7 @@
                         var relays = hedgehog_client.relays;
                         var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
                         var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
-                        super_nostr.sendEvent( event, relays[ 0 ] );
+                        hedgehog_client.sendEvent( event, relays[ 0 ] );
 
                         var loop = async () => {
                             await hedgehog_client.waitSomeTime( 100 );
@@ -3458,6 +3478,8 @@
                             connection_string: hedgehog_client.convertPubkeyAndRelaysToNprofile( "nprofile", server, relays ),
                             network_string: hedgehog_client.network_string,
                             ln_support: hedgehog_client.ln_support,
+                            use_rest: hedgehog_client.use_rest,
+                            rest_endpoint: hedgehog_client.use_rest ? hedgehog_client.rest_endpoint : undefined,
                         }) );
                         var channel_fee_data = {}
                         var encrypted_channel_fee_data = null;
@@ -3601,8 +3623,10 @@
                     var nostr_pubkey = check_pubkey;
                     var check_server_id = json.check_server_id;
                     var server_info = JSON.parse( hedgehog_client.hexToText( check_server_id ) );
-                    var { connection_string, connection_type, ln_support } = server_info;
+                    var { connection_string, connection_type, ln_support, use_rest, rest_endpoint } = server_info;
                     if ( hedgehog_client.ln_support === "unknown" ) hedgehog_client.ln_support = ln_support;
+                    if ( hedgehog_client.use_rest === "unknown" ) hedgehog_client.use_rest = use_rest;
+                    if ( use_rest ) hedgehog_client.rest_endpoint = rest_endpoint;
                     if ( connection_type === "nostr" ) var [ server, relays ] = hedgehog_client.convertNEvent( connection_string );
                     var listenFunction = async socket => {
                         var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
@@ -3688,7 +3712,7 @@
                                                 });
                                                 var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_counterparty );
                                                 var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
-                                                super_nostr.sendEvent( event, relays[ 0 ] );
+                                                hedgehog_client.sendEvent( event, relays[ 0 ] );
 
                                                 //get the htlc address
                                                 var alice_wants_htlc = true;
@@ -3801,7 +3825,7 @@
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
-                    super_nostr.sendEvent( event, nostr_relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, nostr_relays[ 0 ] );
                 },
                 cashCheck: async ( chan_id, check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey ) => {
                     //prepare the needed variables
@@ -3827,7 +3851,7 @@
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
-                    super_nostr.sendEvent( event, hedgehog_client.relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, hedgehog_client.relays[ 0 ] );
 
                     hedgehog_client.prepToReceiveLNPartOne( chan_id, check_amount, check_preimage );
                 },
@@ -3848,7 +3872,7 @@
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
-                    super_nostr.sendEvent( event, hedgehog_client.relays[ 0 ] );
+                    hedgehog_client.sendEvent( event, hedgehog_client.relays[ 0 ] );
                     await hedgehog_client.waitSomeTime( 10_000 );
                     hedgehog_client.pingServer();
                 },
@@ -3874,6 +3898,17 @@
                     }
                     await hedgehog_client.waitSomeTime( 100 );
                     hedgehog_client.manageChecks();
+                },
+                sendEvent: async ( event, relay ) => {
+                    if ( !hedgehog_client.use_rest ) {
+                        super_nostr.sendEvent( event, relay );
+                        return;
+                    }
+                    fetch( hedgehog_client.rest_endpoint + "/write", {
+                        method: "POST",
+                        headers: {"Content-type": "application/json"},
+                        body: JSON.stringify( event ),
+                    });
                 },
             }
         </script>
