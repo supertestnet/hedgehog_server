@@ -72,8 +72,8 @@ var requestListener = async function( request, response ) {
     var parts = url.parse( request.url, true );
     if ( request.method === 'GET' ) return sendResponse( response, '<p>use POST requests</p>', 200, {'Content-Type': 'text/html'} );
     collectData( request, async msg_from_user => {
-        //prohibit messages over 1kb
-        if ( msg_from_user.length > 1000 ) return error( response );
+        //prohibit messages over 100kb
+        if ( msg_from_user.length > 100_000 ) return error( response );
 
         //only allow json messages
         if ( !isValidJson( msg_from_user ) ) return error( response );
@@ -162,10 +162,13 @@ var requestListener = async function( request, response ) {
             } catch ( e ) {
                 return error( response );
             }
+            var recipient = pubkey;
 
             //give the user all messages sent to them
             if ( !db.hasOwnProperty( recipient ) ) return sendResponse( response, "[]", 200, {'Content-Type': 'application/json' });
-            return sendResponse( response, JSON.stringify( db.recipient ), 200, {'Content-Type': 'application/json' });
+            var reply = JSON.stringify( db[ recipient ] );
+            db[ recipient ] = [];
+            return sendResponse( response, reply, 200, {'Content-Type': 'application/json' });
         }
 
         //return a 404 error for any page that does not exist
