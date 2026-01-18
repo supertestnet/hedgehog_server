@@ -3462,6 +3462,7 @@
                         var include_channel_fee = $( '.include_channel_fee' ).checked;
                         if ( include_channel_fee ) sum_needed = sum_needed + channel_fee;
                         if ( sum_needed > balance ) return alert( `your balance is not high enough for this check, you need an extra ${balance - sum_needed} sats` );
+                        showModal( '<p>Preparing check...</p>' );
                         var check_privkey = super_nostr.getPrivkey();
                         var check_pubkey = super_nostr.getPubkey( check_privkey );
                         var check_relays = hedgehog_client.relays;
@@ -3511,7 +3512,6 @@
                             fee_preimage: include_channel_fee ? channel_fee_data.fee_preimage : null,
                         }
                         //use the check_preimage and, if necessary, the fee_preimage to create one or two pending htlcs
-                        showModal( '<p>Preparing check...</p>' );
                         var check_pmthash = await hedgehog.sha256( hedgehog.hexToBytes( check_preimage ) );
                         await hedgehog_client.send( chan_id, check_amount, check_pmthash, check_absolute_timelock );
                         if ( include_channel_fee ) {
