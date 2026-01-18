@@ -2135,6 +2135,7 @@
                 utxos: {},
                 nostr_privkey: null,
                 nostr_pubkey: null,
+                network_string: null,
                 utxos_privkey: null,
                 utxos_pubkey: null,
                 utxos_addy: null,
@@ -2849,7 +2850,7 @@
                                 //add a buffer, because if you force close exactly 20 blocks before your inbound payment expires, you risk a race condition, as the first moment you can recover your money from your outbound payment is also the moment they get their money back, so if they sweep your payment with the preimage at that moment, and you grab the preimage from the blockchain (or mempool) and try to settle your inbound payment with it, in that same block they get to try to try to recover their money via the absolute timelock path, and then miners pick who actually gets the money, because that's a race condition
                                 var htlc_buffer = 10;
                                 //TODO: handle any errors returned by the fetch command below
-                                var bh_data = await fetch( `https://${hedgehog_server.explorer}/testnet4/api/blocks/tip/height` );
+                                var bh_data = await fetch( `https://${hedgehog_server.explorer}/${hedgehog_server.network}api/blocks/tip/height` );
                                 var current_blockheight = await bh_data.text();
                                 var current_blockheight = Number( current_blockheight );
                                 //for purposes of calculating when I must force close, I take the htlc that pays me
@@ -2926,7 +2927,7 @@
                                 //add a buffer, because if you force close exactly 20 blocks before your inbound payment expires, you risk a race condition, as the first moment you can recover your money from your outbound payment is also the moment they get their money back, so if they sweep your payment with the preimage at that moment, and you grab the preimage from the blockchain (or mempool) and try to settle your inbound payment with it, in that same block they get to try to try to recover their money via the absolute timelock path, and then miners pick who actually gets the money, because that's a race condition
                                 var htlc_buffer = 10;
                                 //TODO: handle any errors returned by the fetch command below
-                                var bh_data = await fetch( `https://${hedgehog_server.explorer}/testnet4/api/blocks/tip/height` );
+                                var bh_data = await fetch( `https://${hedgehog_server.explorer}/${hedgehog_server.network}api/blocks/tip/height` );
                                 var current_blockheight = await bh_data.text();
                                 var current_blockheight = Number( current_blockheight );
                                 //TODO: reassess the value of this min_cltv; I think it should be updated to reflect the fact that my swap address uses a timelock of 2016 blocks
@@ -3013,7 +3014,7 @@
                                 //add a buffer, because if you force close exactly 20 blocks before your inbound payment expires, you risk a race condition, as the first moment you can recover your money from your outbound payment is also the moment they get their money back, so if they sweep your payment with the preimage at that moment, and you grab the preimage from the blockchain (or mempool) and try to settle your inbound payment with it, in that same block they get to try to try to recover their money via the absolute timelock path, and then miners pick who actually gets the money, because that's a race condition
                                 var htlc_buffer = 10;
                                 //TODO: handle any errors returned by the fetch command below
-                                var bh_data = await fetch( `https://${hedgehog_server.explorer}/testnet4/api/blocks/tip/height` );
+                                var bh_data = await fetch( `https://${hedgehog_server.explorer}/${hedgehog_server.network}api/blocks/tip/height` );
                                 var current_blockheight = await bh_data.text();
                                 var current_blockheight = Number( current_blockheight );
                                 var block_when_i_must_force_close = ( ( current_blockheight + min_cltv ) - relative_timelock ) - htlc_buffer;
@@ -3614,8 +3615,8 @@
                 console.log( 'server id:' );
                 console.log( server_id );
             }
-            // var nostr_relays = [ "wss://relay.nuts.cash/" ];
-            var nostr_relays = [ "ws://127.0.0.1:6969" ];
+            var nostr_relays = [ "wss://relay.nuts.cash/" ];
+            // var nostr_relays = [ "ws://127.0.0.1:6969" ];
             var minimum_channel_capacity = 80_000;
             var inbound_capacity_fee = 330; //if you set a fee of 1 and set 'absolute' below, you will charge 1 sat per channel regardless of its size; if you set a fee of 1 and set 'percent' below, you will charge 1% of the channel capacity instead
             var inbound_capacity_fee_type = 'absolute'; //can be 'absolute' or change to 'percent'
@@ -3623,6 +3624,7 @@
             //TODO: do not hard-code this nostr privkey; the server should make one at random and then set their rest server, if any, to use it
             hedgehog_server.nostr_privkey = "93227dfc17a3a80ff230dd7a95b6d024bffa1d89cf263b9bf3e2311af6ae265f";
             hedgehog_server.nostr_pubkey = super_nostr.getPubkey( hedgehog_server.nostr_privkey );
+            hedgehog_server.network_string = blockchain;
             var server_id = hedgehog_server.textToHex( JSON.stringify({
                 connection_type: "nostr",
                 connection_string: hedgehog_server.convertPubkeyAndRelaysToNprofile( "nprofile", hedgehog_server.nostr_pubkey, nostr_relays ),
