@@ -408,7 +408,7 @@
                     }
 
                     //return all the variables and txs needed for creating the new state
-                    var txs = [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ];
+                    var txs = [ recipients_new_balance, channel_tree, channel_cblock, midstate_scripts, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ];
                     if ( conditional_revocation_needed ) txs.push( conditional_revocation_tx, prev_tx1 );
                     return txs;
                 },
@@ -634,10 +634,10 @@
                     if ( latest_state && latest_state.hasOwnProperty( "extra_outputs" ) ) extra_outputs = latest_state.extra_outputs;
                     if ( overwrite_extra_outputs ) extra_outputs = overwrite_extra_outputs;
                     var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, null, null, null, extra_outputs );
-                    var [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
-                    //getTxData always returns 10 items. It also returns two additional items if a conditional revocation was needed on a prior state, so in that circumstance we also grab those two additional items so that we can sign them
-                    if ( txs.length > 10 ) {
-                        var conditional_revocation_tx = txs[ 10 ];
+                    var [ recipients_new_balance, channel_tree, channel_cblock, midstate_scripts, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
+                    //getTxData always returns 11 items. It also returns two additional items if a conditional revocation was needed on a prior state, so in that circumstance we also grab those two additional items so that we can sign them
+                    if ( txs.length > 11 ) {
+                        var conditional_revocation_tx = txs[ 11 ];
                         var prev_tx1 = txs[ 11 ];
                     }
 
@@ -653,6 +653,8 @@
                         amnt: recipients_new_balance,
                         amnt_sent: amnt,
                         tx1: tapscript.Tx.encode( tx1 ).hex,
+                        tx2: JSON.stringify( tx2 ),
+                        midstate_scripts,
                         absolute_revocation_hash,
                         added_htlc: false,
                         extra_outputs,
@@ -714,11 +716,11 @@
                     if ( latest_state && latest_state.hasOwnProperty( "extra_outputs" ) ) extra_outputs = latest_state.extra_outputs;
                     if ( overwrite_extra_outputs ) extra_outputs = overwrite_extra_outputs;
                     var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, null, null, null, extra_outputs );
-                    var [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
-                    //getTxData always returns 10 items. It also returns two additional items if a conditional revocation was needed on a prior state, so in that circumstance we also grab those two additional items so that we can validate the signatures involving them
-                    if ( txs.length > 10 ) {
-                        var conditional_revocation_tx = txs[ 10 ];
-                        var prev_tx1 = txs[ 11 ];
+                    var [ recipients_new_balance, channel_tree, channel_cblock, midstate_scripts, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
+                    //getTxData always returns 11 items. It also returns two additional items if a conditional revocation was needed on a prior state, so in that circumstance we also grab those two additional items so that we can validate the signatures involving them
+                    if ( txs.length > 11 ) {
+                        var conditional_revocation_tx = txs[ 11 ];
+                        var prev_tx1 = txs[ 12 ];
                     }
 
                     //validate the signatures
@@ -768,6 +770,8 @@
                         to_midstate_sig,
                         finalizer_sig,
                         tx1: tapscript.Tx.encode( tx1 ).hex,
+                        tx2: JSON.stringify( tx2 ),
+                        midstate_scripts,
                         absolute_revocation_hash,
                         added_htlc: false,
                         extra_outputs,
@@ -856,7 +860,7 @@
                     var use_custom_midstate_revhash = true;
                     var do_not_delete = true;
                     var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash, null, extra_outputs, do_not_delete );
-                    var [ _, _, _, _, _, _, _, _, _, recipients_tx2 ] = txs;
+                    var [ _, _, _, _, _, _, _, _, _, _, recipients_tx2 ] = txs;
                     var senders_version_of_tx1_txid = tapscript.Tx.util.getTxid( senders_version_of_tx1 );
                     var recipients_version_of_tx1_txid = tapscript.Tx.util.getTxid( recipients_version_of_tx1 );
                     // console.log( 'senders_version_of_tx1_txid:', senders_version_of_tx1_txid );
@@ -1134,7 +1138,7 @@
                     if ( latest_state && latest_state.hasOwnProperty( "extra_outputs" ) ) extra_outputs = latest_state.extra_outputs;
                     var do_not_delete = true;
                     var txs = hedgehog.getTxData( chan_id, am_alice_for_tx1, am_sender, amnt, sender_for_tx1, htlc_addy_and_amnt, use_custom_midstate_revhash, midstate_scripts_override, extra_outputs, do_not_delete );
-                    var [ _, _, _, _, _, _, _, _, senders_tx1, senders_tx2 ] = txs;
+                    var [ _, _, _, _, _, _, _, _, _, senders_tx1, senders_tx2 ] = txs;
                     if ( tapscript.Tx.util.getTxid( senders_tx1 ) !== tapscript.Tx.util.getTxid( senders_version_of_tx1 ) ) return console.log( 'error, something rough happened to tx1' );
                     var senders_pub = state.alices_pub;
                     if ( !am_alice ) var senders_pub = state.bobs_pub;
@@ -1170,11 +1174,11 @@
                     if ( latest_state && latest_state.hasOwnProperty( "extra_outputs" ) ) extra_outputs = latest_state.extra_outputs;
                     var do_not_delete = true;
                     var txs = hedgehog.getTxData( chan_id, am_alice, am_sender, amnt, sender, htlc_addy_and_amnt, use_custom_midstate_revhash, null, extra_outputs, do_not_delete );
-                    var [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
-                    //getTxData always returns 10 items. It also returns two additional items if a conditional revocation was needed on a prior state, so in that circumstance we also grab those two additional items so that we can sign them
-                    if ( txs.length > 10 ) {
-                        var conditional_revocation_tx = txs[ 10 ];
-                        var prev_tx1 = txs[ 11 ];
+                    var [ recipients_new_balance, channel_tree, channel_cblock, midstate_scripts, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
+                    //getTxData always returns 11 items. It also returns two additional items if a conditional revocation was needed on a prior state, so in that circumstance we also grab those two additional items so that we can sign them
+                    if ( txs.length > 11 ) {
+                        var conditional_revocation_tx = txs[ 11 ];
+                        var prev_tx1 = txs[ 12 ];
                     }
 
                     //ensure tx1 is the same now as it was before
@@ -1219,6 +1223,8 @@
                         amnt: recipients_new_balance,
                         amnt_sent: 0,
                         tx1: tapscript.Tx.encode( tx1 ).hex,
+                        tx2: JSON.stringify( tx2 ),
+                        midstate_scripts,
                         absolute_revocation_hash,
                         absolute_revocation_preimage: null,
                         conditional_revocation_sig: null,
@@ -1299,6 +1305,7 @@
                 receiveHtlcPartTwo: async data_from_sender => {
                     //process the data from the sender
                     var { chan_id, amnt, htlc_sigs, pmthash, s_recovery_p2_revhash, relative_timelock, absolute_timelock } = data_from_sender;
+                    if ( !absolute_timelock && absolute_timelock !== 0 ) return console.log( 'error, bad absolute timelock' );
                     if ( chan_id.startsWith( "a_" ) ) chan_id = "b_" + chan_id.substring( 2 );
                     else chan_id = "a_" + chan_id.substring( 2 );
                     //TODO: force close if the following errors are thrown
@@ -1413,7 +1420,7 @@
                     if ( latest_state && latest_state.hasOwnProperty( "extra_outputs" ) ) extra_outputs = latest_state.extra_outputs;
                     var do_not_delete = true;
                     var txs = hedgehog.getTxData( chan_id, am_alice, am_sender_for_tx1, amnt, sender, htlc_addy_and_amnt, null, null, extra_outputs, do_not_delete );
-                    var [ recipients_new_balance, channel_tree, channel_cblock, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
+                    var [ recipients_new_balance, channel_tree, channel_cblock, midstate_scripts, midstate_tree, midstate_cblock, amnt, conditional_revocation_needed, absolute_revocation_hash, tx1, tx2 ] = txs;
                     tx2.vin[ 0 ].prevout.scriptPubKey = tx1.vout[ 0 ].scriptPubKey;
                     var senders_tx2_sighash = tapscript.Signer.taproot.hash( tx2, 0, {extension: midstate_tree[ 0 ] }).hex;
                     var sig_on_senders_tx2 = tapscript.Signer.taproot.sign( privkey, tx2, 0, {extension: midstate_tree[ 0 ]} ).hex;
@@ -1533,6 +1540,8 @@
                         to_midstate_sig,
                         finalizer_sig,
                         tx1: tapscript.Tx.encode( recipients_version_of_tx1 ).hex,
+                        tx2: JSON.stringify( recipients_tx2 ),
+                        midstate_scripts: recipients_midstate_scripts,
                         absolute_revocation_hash: s_midstate_revhash,
                         added_htlc: true,
                         extra_outputs,
@@ -1761,7 +1770,7 @@
                     var am_sender = false;
                     var tx1_txid = tapscript.Tx.util.getTxid( m_r_s.tx1 );
                     var revhash = m_r_s.absolute_revocation_hash;
-                    var midstate_scripts = hedgehog.getMidstateScripts( chan_id, am_sender, revhash );
+                    var midstate_scripts = m_r_s.midstate_scripts;
                     var [ midstate, midstate_tree, midstate_cblock ] = hedgehog.getAddressData( midstate_scripts, 0 );
                     var amnt = m_r_s.amnt;
                     var sum_of_alices_htlcs = 0;
@@ -1772,13 +1781,18 @@
                         else sum_of_bobs_htlcs = sum_of_bobs_htlcs + htlc.amnt;
                     });
                     var amnt_in_output_0 = Number( tx1.vout[ 0 ].value );
-                    //since I'm not the person who created tx2 when I received money in it, I believe that if I *am* Alice, I pretend to be Bob while creating it here, and if I am *not* Alice, I pretend to *be* Alice
-                    var am_alice_for_tx2 = !am_alice;
+                    //I'm not the person who created tx2 when I received money in it, so if I *am* Alice, I pretend to be Bob while creating it here, and if I am *not* Alice, I pretend to *be* Alice
+                    var am_alice_for_tx2 = am_alice;
                     var tx2 = hedgehog.getTx2( chan_id, am_sender, tx1_txid, midstate, amnt, sum_of_alices_htlcs, sum_of_bobs_htlcs, am_alice_for_tx2, amnt_in_output_0 );
+                    var expected_version_of_tx2 = m_r_s.tx2;
 
                     //sign tx2
                     var recipients_finalizer_sig = tapscript.Signer.taproot.sign( privkey, tx2, 0, { extension: midstate_tree[ 0 ] }).hex;
                     var senders_finalizer_sig = m_r_s.finalizer_sig;
+                    var finalizer_sighash = tapscript.Signer.taproot.hash( tx2, 0, { extension: midstate_tree[ 0 ] }).hex;
+                    var senders_pub = am_alice ? state.bobs_pub : state.alices_pub;
+                    var senders_finalizer_sig_is_valid = await nobleSecp256k1.schnorr.verify( senders_finalizer_sig, finalizer_sighash, senders_pub );
+                    console.log( 'senders_finalizer_sig_is_valid, right?', senders_finalizer_sig_is_valid );
                     if ( am_alice ) tx2.vin[ 0 ].witness = [ senders_finalizer_sig, recipients_finalizer_sig, midstate_scripts[ 0 ], midstate_cblock ];
                     else tx2.vin[ 0 ].witness = [ recipients_finalizer_sig, senders_finalizer_sig, midstate_scripts[ 0 ], midstate_cblock ];
 
@@ -1826,6 +1840,7 @@
                     tx2_fee.vin[ 1 ].witness = [ fee2_sig ];
 
                     //broadcast everything
+                    //TODO: if there were extra outputs, prepare to broadcast their sweep txs as their timeouts approach
                     return { tx1, tx1_fee, tx2, tx2_fee }
                 },
                 getHtlcSigs: ( chan_id, sender_is_funder, am_sender, pmthash, relative_timelock, privkey, senders_reveal_part_one_tx, recipients_reveal_part_one_tx ) => {
@@ -2179,11 +2194,10 @@
                                 return;
                             }
                             if ( json.msg_type === "two_way_comms" ) {
-                                console.log( json );
                                 var msg_id = json.msg_value.message_identifier;
                                 var privkey = hedgehog_server.nostr_privkey;
                                 var counterpartys_pubkey = event.pubkey;
-                                if ( json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "htlc_to_server_part_one" ) {
+                                if ( json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "create_htlc_for_server_part_one" ) {
 
                                     //parse the message from the user
                                     var data_for_htlc_p1 = json.msg_value;
@@ -2194,7 +2208,7 @@
                                     //send channel data to user
                                     var msg_for_counterparty = JSON.stringify({
                                         msg_type: "two_way_comms",
-                                        msg_value: {message_identifier: msg_id, data_for_counterparty: my_revhashes, more_message_info: "htlc_to_server_part_two"},
+                                        msg_value: {message_identifier: msg_id, data_for_counterparty: my_revhashes, more_message_info: "create_htlc_for_server_part_two"},
                                     });
                                     var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
                                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
@@ -2202,7 +2216,7 @@
 
                                     return;
                                 }
-                                if ( json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "htlc_to_server_part_three" ) {
+                                if ( json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "create_htlc_for_server_part_three" ) {
                                     //parse the message from the server
                                     var data_for_htlc_p2 = json.msg_value;
                                     delete data_for_htlc_p2[ "message_identifier" ];
@@ -2212,14 +2226,14 @@
                                     //send channel data to user
                                     var msg_for_counterparty = JSON.stringify({
                                         msg_type: "two_way_comms",
-                                        msg_value: {message_identifier: msg_id, data_for_counterparty, more_message_info: "htlc_to_server_part_four"},
+                                        msg_value: {message_identifier: msg_id, data_for_counterparty, more_message_info: "create_htlc_for_server_part_four"},
                                     });
                                     var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
                                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
                                     hedgehog_server.sendEvent( event, nostr_relays[ 0 ] );
                                 }
 
-                                if ( json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "htlc_to_server_part_five" ) {
+                                if ( json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "create_htlc_for_server_part_five" ) {
 
                                     var data_for_htlc_p3 = json.msg_value;
                                     delete data_for_htlc_p3[ "message_identifier" ];
@@ -2229,7 +2243,7 @@
                                     //send channel data to server
                                     var msg_for_counterparty = JSON.stringify({
                                         msg_type: "two_way_comms",
-                                        msg_value: {message_identifier: msg_id, data_for_counterparty, more_message_info: "htlc_to_server_part_six"},
+                                        msg_value: {message_identifier: msg_id, data_for_counterparty, more_message_info: "create_htlc_for_server_part_six"},
                                     });
                                     var emsg = await super_nostr.alt_encrypt( privkey, counterpartys_pubkey, msg_for_counterparty );
                                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", counterpartys_pubkey ] ] );
@@ -2270,12 +2284,13 @@
                                     if ( index_of_pending_htlc < 0 ) error = "irredeemable";
 
                                     //check timelock info
-                                    //TODO: allow absolute timelocks other than 0
-                                    //TODO: also compare it with the one in the actual htlc
-                                    if ( check_absolute_timelock !== 0 ) error = "irredeemable";
+                                    var current_timestamp = Math.floor( Date.now() / 1000 );
+                                    var pending_htlc = extra_outputs[ index_of_pending_htlc ];
+                                    var htlcs_timelock = pending_htlc.absolute_timelock;
+                                    if ( htlcs_timelock !== check_absolute_timelock ) error = `irredeemable because your counterparty lied about the timelock`;
+                                    if ( htlcs_timelock > current_timestamp ) error = `irredeemable until ${htlcs_timelock}`;
 
                                     //ensure amount matches
-                                    var pending_htlc = extra_outputs[ index_of_pending_htlc ];
                                     if ( pending_htlc.amnt !== check_amnt ) error = "irredeemable";
                                 }
 
@@ -2639,6 +2654,7 @@
                                             //ask your counterparty to resolve the htlc whenever they are online
                                             extra_outputs[ index_of_pending_htlc ].pmt_preimage = fee_preimage;
                                             need_fee_payment = false;
+
                                         if ( !hedgehog_server.channels_with_htlcs_that_need_resolving.hasOwnProperty( fee_chan_id ) ) hedgehog_server.channels_with_htlcs_that_need_resolving[ fee_chan_id ] = [];
                                             hedgehog_server.channels_with_htlcs_that_need_resolving[ fee_chan_id ].push( fee_preimage );
                                             //TODO: reimburse the fee payer for the unused portion of their htlc, now if possible, otherwise whenever they are next online
@@ -2841,10 +2857,13 @@
                                 //check absolute timelock info
                                 //TODO: allow absolute timelocks other than 0
                                 //TODO: also compare it with the one in the actual htlc
-                                if ( check_absolute_timelock !== 0 ) return;
+                                var current_timestamp = Math.floor( Date.now() / 1000 );
+                                var pending_htlc = extra_outputs[ index_of_pending_htlc ];
+                                var htlcs_timelock = pending_htlc.absolute_timelock;
+                                if ( htlcs_timelock !== check_absolute_timelock ) return;
+                                if ( htlcs_timelock > current_timestamp ) return;
 
                                 //check relative timelock info
-                                var pending_htlc = extra_outputs[ index_of_pending_htlc ];
                                 if ( !pending_htlc.relative_timelock || pending_htlc.relative_timelock < 2026 ) return;
 
                                 //ensure amount matches
@@ -3628,8 +3647,8 @@
                 console.log( 'server id:' );
                 console.log( server_id );
             }
-            var nostr_relays = [ "wss://relay.nuts.cash/" ];
-            // var nostr_relays = [ "ws://127.0.0.1:6969" ];
+            // var nostr_relays = [ "wss://relay.nuts.cash/" ];
+            var nostr_relays = [ "ws://127.0.0.1:6969" ];
             var minimum_channel_capacity = 80_000;
             var inbound_capacity_fee = 330; //if you set a fee of 1 and set 'absolute' below, you will charge 1 sat per channel regardless of its size; if you set a fee of 1 and set 'percent' below, you will charge 1% of the channel capacity instead
             var inbound_capacity_fee_type = 'absolute'; //can be 'absolute' or change to 'percent'
