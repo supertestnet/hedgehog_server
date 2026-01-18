@@ -2174,6 +2174,7 @@
                                 return;
                             }
                             if ( json.msg_type === "two_way_comms" ) {
+                                console.log( json );
                                 var msg_id = json.msg_value.message_identifier;
                                 var privkey = hedgehog_server.nostr_privkey;
                                 var counterpartys_pubkey = event.pubkey;
