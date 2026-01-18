@@ -2613,6 +2613,9 @@
                     var event = await loop();
                     delete hedgehog_client.two_way_comms[ message_identifier ];
 
+                    //tell the user what's up
+                    showModal( `<p>Payment detected -- bridging from L1 to hedgehog, please wait</p>` );
+
                     //get the next message from the server
                     var message_identifier = "two_way_comms";
                     delete hedgehog_client.two_way_comms[ message_identifier ];
@@ -2623,9 +2626,6 @@
                     }
                     var event = await loop();
                     delete hedgehog_client.two_way_comms[ message_identifier ];
-
-                    //tell the user what's up
-                    showModal( `<p>Payment detected -- bridging from L1 to hedgehog, please wait</p>` );
 
                     //parse the message from the server
                     var json = JSON.parse( event.content );
@@ -3501,8 +3501,6 @@
                         });
                         var encrypted_data = await super_nostr.alt_encrypt( check_privkey, check_pubkey, data_to_put_on_nostr );
                         var event = await super_nostr.prepEvent( check_privkey, encrypted_data, 16109 );
-                        var socket_id = Object.keys( super_nostr.sockets )[ 0 ];
-                        var socket = super_nostr.sockets[ socket_id ].socket;
                         var worked = await super_nostr.alt_sendEvent( event, hedgehog_client.relays[ 0 ] );
                         var check_data = {
                             data_to_put_on_nostr: JSON.parse( data_to_put_on_nostr ),
@@ -3510,6 +3508,7 @@
                             check_label,
                             check_status: "ready to cash",
                             channel_fee: include_channel_fee ? channel_fee : 0,
+                            fee_preimage: include_channel_fee ? channel_fee_data.fee_preimage : null,
                         }
                         //use the check_preimage and, if necessary, the fee_preimage to create one or two pending htlcs
                         showModal( '<p>Preparing check...</p>' );
@@ -3524,6 +3523,13 @@
                     }
                 },
                 handleChecksLoop: async () => {
+                    var chan_id = hedgehog_client.getChanId();
+                    if ( !chan_id ) {
+                        await hedgehog_client.waitSomeTime( 100 );
+                        hedgehog_client.handleChecksLoop();
+                        return;
+                    }
+                    var state = hedgehog.state[ chan_id ];
                     var num_of_checks = hedgehog_client.num_of_checks;
                     var checks = Object.keys( hedgehog_client.checks );
                     if ( !checks.length ) {
@@ -3532,20 +3538,39 @@
                         hedgehog_client.handleChecksLoop();
                         return;
                     }
-                    if ( checks.length === num_of_checks && $$( '.check' ).length === num_of_checks ) {
-                        await hedgehog_client.waitSomeTime( 100 );
-                        hedgehog_client.handleChecksLoop();
-                        return;
-                    }
                     hedgehog_client.num_of_checks = checks.length;
-                    $( '.pending_checks' ).innerHTML = ``;
-                    checks.forEach( check_id => {
+                    var all_html = document.createElement( "div" );
+                    var state_changed = false;
+                    var i; for ( i=0; i<checks.length; i++ ) {
+                        var check_id = checks[ i ];
                         var check = hedgehog_client.checks[ check_id ];
                         var url = `${window.location.protocol}//${window.location.hostname}/${window.location.pathname}#check=${check_id}`;
-                        var qr = hedgehog_client.createQR( url.toUpperCase() );
+                        var check_amount = check.channel_fee ? String( check.check_amount ) + "&nbsp;+&nbsp;" + String( check.channel_fee ) : check.check_amount;
+                        if ( check.channel_fee ) {
+                            //check if the fee htlc is still pending; if not, remove it from the interface
+                            var fee_preimage = check.fee_preimage;
+                            var fee_pmthash = await hedgehog.sha256( hedgehog.hexToBytes( fee_preimage ) );
+                            var extra_outputs = [];
+                            var latest_state = state.channel_states[ state.channel_states.length - 1 ];
+                            if ( latest_state && latest_state.hasOwnProperty( "extra_outputs" ) ) extra_outputs = latest_state.extra_outputs;
+                            var fee_htlc_still_exists = false;
+                            extra_outputs.every( output => {
+                                if ( output.pmthash !== fee_pmthash ) return true;
+                                fee_htlc_still_exists = true;
+                            });
+                            if ( !fee_htlc_still_exists ) check_amount = check.check_amount;
+                        }
+                        var check_state = JSON.stringify({
+                            label: check.check_label,
+                            amount: check_amount,
+                            status: check.check_status,
+                            url,
+                        });
+                        var prev_state = $( `.${check_id}` ) ? $( `.${check_id}` ).getAttribute( "data-check_state" ) : null;
+                        if ( check_state !== prev_state ) state_changed = true;
                         var check_html = `
                             <div>Label: <span class="check_label">${check.check_label}</span></div>
-                            <div>Amount: <span class="check_amount">${check.channel_fee ? String( check.check_amount ) + "&nbsp;+&nbsp;" + String( check.channel_fee ) : check.check_amount}</span></div>
+                            <div>Amount: <span class="check_amount">${check_amount}</span></div>
                             <div>Status: <span class="check_status">${check.check_status}</span></div>
                             <div><button class="check_btn void_this_check">Void this check</button></div>
                             <div><button class="check_btn view_check_qr">View qr code</button></div>
@@ -3556,13 +3581,16 @@
                         var div = document.createElement( "div" );
                         div.classList.add( "check" );
                         div.classList.add( check_id );
+                        div.setAttribute( "data-check_state", check_state );
                         div.innerHTML = check_html;
-                        div.getElementsByClassName( "check_qr_code" )[ 0 ].append( qr );
                         div.getElementsByClassName( "void_this_check" )[ 0 ].onclick = () => {
                             showModal( `This button doesn't do anything yet` );
                         }
                         div.getElementsByClassName( "view_check_qr" )[ 0 ].onclick = () => {
+                            var url = $( `.${check_id} .check_payment_string` ).innerText;
+                            var qr = hedgehog_client.createQR( url.toUpperCase() );
                             var item = $( `.${check_id} .check_qr_code` );
+                            item.append( qr );
                             if ( item.classList.contains( "hidden" ) ) item.classList.remove( "hidden" );
                             else item.classList.add( "hidden" );
                         }
@@ -3571,8 +3599,12 @@
                             if ( item.classList.contains( "hidden" ) ) item.classList.remove( "hidden" );
                             else item.classList.add( "hidden" );
                         }
-                        $( '.pending_checks' ).append( div );
-                    });
+                        all_html.append( div );
+                    }
+                    if ( state_changed ) {
+                        $( '.pending_checks' ).innerHTML = ``;
+                        $( '.pending_checks' ).append( all_html );
+                    }
                     await hedgehog_client.waitSomeTime( 100 );
                     hedgehog_client.handleChecksLoop();
                 },
@@ -3628,16 +3660,6 @@
                     if ( hedgehog_client.use_rest === "unknown" ) hedgehog_client.use_rest = use_rest;
                     if ( use_rest ) hedgehog_client.rest_endpoint = rest_endpoint;
                     if ( connection_type === "nostr" ) var [ server, relays ] = hedgehog_client.convertNEvent( connection_string );
-                    var listenFunction = async socket => {
-                        var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
-                        var filter  = {}
-                        filter.authors = [ server ];
-                        filter.kinds = [ 4 ];
-                        filter[ "#p" ] = [ nostr_pubkey ];
-                        filter.since = Math.floor( Date.now() / 1000 );
-                        var subscription = [ "REQ", subId, filter ];
-                        socket.send( JSON.stringify( subscription ) );
-                    }
                     var handleFunction = async message => {
                         var [ type, subId, event ] = JSON.parse( message.data );
                         if ( !event || event === true ) return;
@@ -3814,7 +3836,35 @@
                             console.log( e );
                         }
                     }
-                    await super_nostr.newPermanentConnection( relays[ 0 ], listenFunction, handleFunction );
+                    if ( hedgehog_client.use_rest ) {
+                        var loop = async () => {
+                            var sig = await nobleSecp256k1.schnorr.sign( "a".repeat( 64 ), nostr_privkey );
+                            var data = await fetch( hedgehog_client.rest_endpoint + "/read", {
+                                method: "POST",
+                                headers: {
+                                    "Content-type": "application/json"
+                                },
+                                body: JSON.stringify({sig, pubkey: nostr_pubkey}),
+                            });
+                            var json = await data.json();
+                            json.forEach( item => handleFunction({ data: JSON.stringify( [ null, null, item ] )}) );
+                            await hedgehog_client.waitSomeTime( 1_000 );
+                            return loop();
+                        }
+                        loop();
+                    } else {
+                        var listenFunction = async socket => {
+                            var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
+                            var filter  = {}
+                            filter.authors = [ server ];
+                            filter.kinds = [ 4 ];
+                            filter[ "#p" ] = [ nostr_pubkey ];
+                            filter.since = Math.floor( Date.now() / 1000 );
+                            var subscription = [ "REQ", subId, filter ];
+                            socket.send( JSON.stringify( subscription ) );
+                        }
+                        await super_nostr.newPermanentConnection( relays[ 0 ], listenFunction, handleFunction );
+                    }
 
                     //ensure check is redeemable
                     var nostr_relays = relays;
