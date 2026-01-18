@@ -1569,12 +1569,6 @@
                         });
                     });
                 },
-                resolveHtlcAsSender: async ( chan_id, preimage ) => {
-                    console.log( chan_id, preimage );
-                },
-                resolveHtlcAsRecipient: async ( chan_id, pmthash ) => {
-
-                },
                 forceClose: async ( chan_id, txid, txdata, try_to_cheat ) => {
                     //prepare variables needed for force closing the channel
                     var state = hedgehog.state[ chan_id ];
@@ -1775,7 +1769,17 @@
                     var midstate_scripts = hedgehog.getMidstateScripts( chan_id, am_sender, revhash );
                     var [ midstate, midstate_tree, midstate_cblock ] = hedgehog.getAddressData( midstate_scripts, 0 );
                     var amnt = m_r_s.amnt;
-                    var tx2 = hedgehog.getTx2( chan_id, am_sender, tx1_txid, midstate, amnt );
+                    var sum_of_alices_htlcs = 0;
+                    var sum_of_bobs_htlcs = 0;
+                    var extra_outputs = m_r_s.extra_outputs;
+                    extra_outputs.forEach( htlc => {
+                        if ( htlc.sender === "alice" ) sum_of_alices_htlcs = sum_of_alices_htlcs + htlc.amnt;
+                        else sum_of_bobs_htlcs = sum_of_bobs_htlcs + htlc.amnt;
+                    });
+                    var amnt_in_output_0 = Number( tx1.vout[ 0 ].value );
+                    //since I'm not the person who created tx2 when I received money in it, I believe that if I *am* Alice, I pretend to be Bob while creating it here, and if I am *not* Alice, I pretend to *be* Alice
+                    var am_alice_for_tx2 = !am_alice;
+                    var tx2 = hedgehog.getTx2( chan_id, am_sender, tx1_txid, midstate, amnt, sum_of_alices_htlcs, sum_of_bobs_htlcs, am_alice_for_tx2, amnt_in_output_0 );
 
                     //sign tx2
                     var recipients_finalizer_sig = tapscript.Signer.taproot.sign( privkey, tx2, 0, { extension: midstate_tree[ 0 ] }).hex;
@@ -2109,7 +2113,6 @@
                     var relative_timelock = 20;
                     var pmthash = await hedgehog.sendHtlc( chan_id, amnt, relative_timelock );
                     var preimage = await hedgehog.findPreimage( chan_id, pmthash );
-                    await hedgehog.resolveHtlcAsSender( chan_id, preimage );
                     console.log( 'yay' );
                 },
                 runAllTests: async () => {
