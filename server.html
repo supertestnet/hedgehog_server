@@ -2680,9 +2680,7 @@
                                 hedgehog.keypairs[ channel_pubkey ] = {privkey: channel_privkey, preimage: channel_preimage}
 
                                 //get a change address
-                                var change_privkey = super_nostr.getPrivkey();
-                                var change_pubkey = super_nostr.getPubkey( change_privkey );
-                                var change_address = tapscript.Address.fromScriptPubKey( [ 1, change_pubkey ], hedgehog.network );
+                                var change_address = hedgehog_server.utxos_addy;
 
                                 //save the data for later use
                                 //TODO: save the change address privkey for use later
@@ -2734,7 +2732,11 @@
 
                                 //check if channel funding txid and vout are correct
                                 var funding_vin = [];
-                                prev_data.utxos.forEach( utxo => funding_vin.push( hedgehog.getVin( utxo.txid, utxo.vout, utxo.amnt, utxo.addy ) ) );
+                                var sum_of_utxos = 0;
+                                prev_data.utxos.forEach( utxo => {
+                                    sum_of_utxos = sum_of_utxos + utxo.amnt;
+                                    funding_vin.push( hedgehog.getVin( utxo.txid, utxo.vout, utxo.amnt, utxo.addy ) );
+                                });
                                 var funding_tx = tapscript.Tx.create({
                                     version: 2,
                                     vin: funding_vin,
@@ -3283,6 +3285,12 @@
 
                                 //remove the preimage from the list of htlcs to resolve
                                 if ( hedgehog_server.channels_with_htlcs_that_need_resolving.hasOwnProperty( chan_id ) && hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].indexOf( preimage ) > -1 ) hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].splice( hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].indexOf( preimage ), 1 );
+
+                                //after a 10 second buffer, allow the server to ask the user to resolve any remaining pending htlcs that may be awaiting resolution
+                                setTimeout( () => {
+                                    var now = Math.floor( Date.now() / 1000 );
+                                    hedgehog_server.comms_keys[ chan_id ][ 1 ] = now + 10;
+                                }, 5_000 );
                             }
                             if ( json.msg_type === "resolve_htlc_to_server_part_four" ) {
                                 if ( hedgehog_server.two_way_comms.hasOwnProperty( json.msg_type ) && hedgehog_server.two_way_comms[ json.msg_type ] === "waiting_for_info" ) hedgehog_server.two_way_comms[ json.msg_type ] = event;
@@ -3579,20 +3587,25 @@
                 hedgehog_server.utxos_addy = tapscript.Address.fromScriptPubKey( [ 1, hedgehog_server.utxos_pubkey ], hedgehog.network );
                 var amnt = 500_000;
                 var txhex = await chain_client.commander( network_string.split( "," ), "send", {destino: hedgehog_server.utxos_addy, amnt, feerate: 1} );
-                var vout = -1;
-                tapscript.Tx.decode( txhex ).vout.every( ( output, index ) => {
-                    if ( Number( output.value ) !== amnt || tapscript.Address.fromScriptPubKey( output.scriptPubKey, hedgehog.network ) !== hedgehog_server.utxos_addy ) return true;
-                    vout = index;
-                });
-                var utxo_id = "u_" + super_nostr.getPrivkey().substring( 0, 16 );
-                hedgehog_server.utxos[ utxo_id ] = {
-                    utxo_id,
-                    txid: tapscript.Tx.util.getTxid( txhex ),
-                    vout,
-                    addy: hedgehog_server.utxos_addy,
-                    skey: hedgehog_server.utxos_privkey,
-                    amnt,
+                var utxoLoop = async () => {
+                    var utxos = await chain_client.commander( network_string.split( "," ), "utxos", hedgehog_server.utxos_addy );
+                    var utxos_to_push = {}
+                    utxos.forEach( utxo => {
+                        var utxo_id = "u_" + utxo.txid + "_" + utxo.vout;
+                        utxos_to_push[ utxo_id ] = {
+                            utxo_id,
+                            txid: utxo.txid,
+                            vout: utxo.vout,
+                            addy: hedgehog_server.utxos_addy,
+                            skey: hedgehog_server.utxos_privkey,
+                            amnt: utxo.value,
+                        }
+                    });
+                    hedgehog_server.utxos = utxos_to_push;
+                    await hedgehog_server.waitSomeTime( 10_000 );
+                    utxoLoop();
                 }
+                utxoLoop();
                 console.log( 'blockhash:', blockhash, 'txhex:', txhex );
                 console.log( 'success! You have 500_000 sats' );
                 hedgehog_server.setUpComms();
