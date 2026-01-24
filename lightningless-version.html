@@ -1000,8 +1000,9 @@
                     var am_sender = true;
                     var sender_is_funder = true;
                     var sender_is_revoker = true;
-                    var data_for_recipient = { chan_id, pmthash, s_midstate_revhash };
-                    var recipients_revhashes = await hedgehog.intercom( data_for_recipient );
+                    var data_for_recipient = { chan_id, pmthash, s_midstate_revhash, more_message_info: "initial_send_htlc_message" };
+                    var debug = true;
+                    var recipients_revhashes = await hedgehog.intercom( data_for_recipient, debug );
                     // var recipients_revhashes = await hedgehog.receiveHtlcPartOne( data_for_recipient );
                     var extra_outputs = [];
                     var latest_state = state.channel_states[ state.channel_states.length - 1 ];
@@ -1310,6 +1311,7 @@
                 receiveHtlcPartTwo: async data_from_sender => {
                     //process the data from the sender
                     var { chan_id, amnt, htlc_sigs, pmthash, s_recovery_p2_revhash, relative_timelock, absolute_timelock } = data_from_sender;
+                    if ( !absolute_timelock && absolute_timelock !== 0 ) return console.log( 'error, bad absolute timelock' );
                     if ( chan_id.startsWith( "a_" ) ) chan_id = "b_" + chan_id.substring( 2 );
                     else chan_id = "a_" + chan_id.substring( 2 );
                     //TODO: force close if the following errors are thrown
@@ -2634,7 +2636,7 @@
                     showModal( `<p>Payment detected -- bridging from L1 to hedgehog, please wait</p>` );
 
                     //get the next message from the server
-                    var message_identifier = "two_way_comms";
+                    var message_identifier = "initial_send_htlc_message";
                     delete hedgehog_client.two_way_comms[ message_identifier ];
                     var loop = async () => {
                         await hedgehog_client.waitSomeTime( 100 );
@@ -3031,6 +3033,9 @@
                                 hedgehog_client.two_way_comms[ msg_id ] = event;
                                 setTimeout( () => {delete hedgehog_client.two_way_comms[ msg_id ]}, 2000 );
                                 return;
+                            }
+                            if ( json.hasOwnProperty( "msg_value" ) ** json.msg_value.hasOwnProperty( "more_message_info" ) && json.msg_value.more_message_info === "initial_send_htlc_message" ) {
+                                hedgehog_client.two_way_comms[ "initial_send_htlc_message" ] = event;
                             }
                             hedgehog_client.two_way_comms[ json.msg_type ] = event;
                         }
