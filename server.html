@@ -995,8 +995,9 @@
                     var am_sender = true;
                     var sender_is_funder = true;
                     var sender_is_revoker = true;
-                    var data_for_recipient = { chan_id, pmthash, s_midstate_revhash };
-                    var recipients_revhashes = await hedgehog.intercom( data_for_recipient );
+                    var data_for_recipient = { chan_id, pmthash, s_midstate_revhash, more_message_info: "initial_send_htlc_message" };
+                    var debug = true;
+                    var recipients_revhashes = await hedgehog.intercom( data_for_recipient, debug );
                     // var recipients_revhashes = await hedgehog.receiveHtlcPartOne( data_for_recipient );
                     var extra_outputs = [];
                     var latest_state = state.channel_states[ state.channel_states.length - 1 ];
@@ -2159,6 +2160,7 @@
                 utxos_addy: null,
                 use_rest: true,
                 rest_endpoint: "http://localhost:8080",
+                swap_contracts: {},
                 isValidHex: hex => {
                     if ( !hex ) return;
                     var length = hex.length;
@@ -2933,7 +2935,7 @@
                                     var utxos = await chain_client.commander( my_network, "utxos", swap_address );
                                     var sum_of_utxos = 0;
                                     utxos.forEach( utxo => sum_of_utxos = sum_of_utxos + utxo.value );
-                                    if ( sum_of_utxos >= htlc_amnt ) return;
+                                    if ( sum_of_utxos >= htlc_amnt ) return utxos;
                                     await super_nostr.waitSomeSeconds( 1 );
                                     return loop();
                                 }
@@ -2967,8 +2969,57 @@
                                 var htlc_pmthash = swap_address_hash;
                                 hedgehog_server.comms_keys[ chan_id ] = [ user_pubkey, Math.floor( Date.now() / 1000 ) ];
                                 var absolute_timelock = 0;
+                                hedgehog_server.swap_contracts[ swap_address_hash ] = null;
+                                //prepare a loop that waits til you learn the preimage, which should happen in resolve_htlc_to_user_part_one; if you do learn it, sweep the money from the swap address -- keeping in mind that you have 2016 blocks to do so
+                                //TODO: ensure this loop starts running again even if you restart the server
+                                var loop = async () => {
+                                    if ( !hedgehog_server.swap_contracts[ swap_address_hash ] ) {
+                                        await hedgehog_server.waitSomeTime( 10 );
+                                        return loop();
+                                    }
+                                    //TODO: write and test code to ensure you still get the preimage and sweep the money from the swap address even if the user force closes their channel before running resolve_htlc_to_user_part_one and takes the money out of the htlc via an L1 tx -- keeping in mind that the user must reveal the preimage on the blockchain or they will not be successsful
+                                    var preimage = hedgehog_server.swap_contracts[ swap_address_hash ];
+
+                                    //prepare a sweep tx
+                                    var input_utxos = swap_address_got_funded;
+                                    var vin = [];
+                                    var amount_in_swap_address = 0;
+                                    input_utxos.forEach( utxo => {
+                                        amount_in_swap_address = amount_in_swap_address + utxo.value;
+                                        vin.push({
+                                            txid: utxo.txid,
+                                            vout: utxo.vout,
+                                            prevout: {
+                                                value: utxo.value,
+                                                scriptPubKey: tapscript.Address.toScriptPubKey( swap_address ),
+                                            },
+                                        });
+                                    });
+                                    //TODO: get txfee from mempool
+                                    var txfee = 500;
+                                    var sweep_tx = tapscript.Tx.create({
+                                        vin,
+                                        vout: [{
+                                            value: amount_in_swap_address - txfee,
+                                            scriptPubKey: tapscript.Address.toScriptPubKey( hedgehog_server.utxos_addy ),
+                                        }],
+                                    });
+
+                                    //sign sweep tx
+                                    var i; for ( i=0; i<input_utxos.length; i++ ) {
+                                        var sig = tapscript.Signer.taproot.sign( privkey, sweep_tx, i, {extension: swap_tree[ 1 ] }).hex;
+                                        sweep_tx.vin[ i ].witness = [ sig, preimage, swap_scripts[ 1 ], swap_cblock ];
+                                    }
+
+                                    //broadcast sweep tx
+                                    //TODO: automate broadcasting the tx
+                                    console.log( `broadcast this tx:` );
+                                    console.log( tapscript.Tx.encode( sweep_tx ).hex );
+                                    delete hedgehog_server.swap_contracts[ swap_address_hash ];
+                                }
+                                loop();
                                 var success_pmthash = await hedgehog.sendHtlc( chan_id, htlc_amnt, relative_timelock, absolute_timelock, htlc_pmthash, block_when_i_must_force_close );
-                                if ( success_pmthash !== ln_invoice_pmthash ) return `error: ${success_pmthash}`;
+                                if ( success_pmthash !== swap_address_hash ) return console.log( `error: ${success_pmthash}` );
                                 console.log( 'htlc is sent' );
                                 return;
                             }
@@ -3056,7 +3107,7 @@
                                 hedgehog_server.comms_keys[ chan_id ] = [ user_pubkey, Math.floor( Date.now() / 1000 ) ];
                                 var absolute_timelock = 0;
                                 var success_pmthash = await hedgehog.sendHtlc( chan_id, htlc_amnt, relative_timelock, absolute_timelock, htlc_pmthash, block_when_i_must_force_close );
-                                if ( success_pmthash !== ln_invoice_pmthash ) return `error: ${success_pmthash}`;
+                                if ( success_pmthash !== ln_invoice_pmthash ) return console.log( `error: ${success_pmthash}` );
                                 console.log( 'htlc is sent' );
                                 return;
                             }
@@ -3096,6 +3147,10 @@
                                     hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ].push( preimage );
                                     delete hedgehog_server.pmthashes_with_htlcs_that_need_resolving[ pmthash ];
                                 });
+
+                                //settle any L1 swap addresses that use that preimage
+                                console.log( 'got the preimage to this pmthash:', pmthash, hedgehog_server.swap_contracts.hasOwnProperty( pmthash ), hedgehog_server.swap_contracts );
+                                if ( hedgehog_server.swap_contracts.hasOwnProperty( pmthash ) ) hedgehog_server.swap_contracts[ pmthash ] = preimage;
 
                                 //find the corresponding htlc
                                 var index_of_pending_htlc = -1;
