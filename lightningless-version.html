@@ -2573,9 +2573,9 @@
                         delete hedgehog_client.two_way_comms[ message_identifier ];
                         //inform the user what's up
                         if ( !skip_channel_payment ) {
-                            var message_to_show_user = `<p>Payment detected. Waiting for channel funding tx to confirm (${hedgehog.state[ chan_id ].funding_txinfo[ 0 ]})</p>`;
+                            var message_to_show_user = `<p>Payment detected. Do not use it until your channel funding tx confirms (${hedgehog.state[ chan_id ].funding_txinfo[ 0 ]}) unless you trust the server</p>`;
                         } else {
-                            var message_to_show_user = `<p>Your check included a bit extra to cover the cost of a new channel. This channel is now being created.</p>`;
+                            var message_to_show_user = `<p>Your check included a bit extra to cover the cost of a new channel. This channel is now being created. Do not use it until your channel funding tx confirms (${hedgehog.state[ chan_id ].funding_txinfo[ 0 ]}) unless you trust the server</p>`;
                         }
                         showModal( message_to_show_user );
                     }
