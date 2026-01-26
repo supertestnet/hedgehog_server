@@ -2173,6 +2173,7 @@
                 inbound_capacity_fee: 330, //if you set a fee of 1 and set 'absolute' below, you will charge 1 sat per channel regardless of its size; if you set a fee of 1 and set 'percent' below, you will charge 1% of the channel capacity instead
                 inbound_capacity_fee_type: "absolute", //can be 'absolute' or change to 'percent'
                 server_id: null,
+                service_fee_interval: 300,
                 isValidHex: hex => {
                     if ( !hex ) return;
                     var length = hex.length;
@@ -2753,7 +2754,7 @@
                                 if ( !channel_is_valid ) return;
                                 var chan_id = "b_" + json.msg_value.chan_id.substring( 2 );
                                 var user_pubkey = event.pubkey;
-                                hedgehog_server.comms_keys[ chan_id ] = { user_pubkey, last_activity: Math.floor( Date.now() / 1000 ), num_of_payments: 0 };
+                                hedgehog_server.comms_keys[ chan_id ] = { user_pubkey, last_activity: Math.floor( Date.now() / 1000 ), last_service_payment: null };
 
                                 //get data from previous part
                                 if ( !hedgehog_server.data_for_channel_opens.hasOwnProperty( event.pubkey ) ) return;
@@ -2811,8 +2812,7 @@
                                         return loop();
                                     }
                                     var fee_invoice_is_paid = await loop();
-                                    console.log( 'yay, fee is paid!' );
-                                    hedgehog_server.comms_keys[ chan_id ][ "num_of_payments" ] = hedgehog_server.comms_keys[ chan_id ][ "num_of_payments" ] + 1;
+                                    hedgehog_server.comms_keys[ chan_id ].last_service_payment = Math.floor( Date.now() / 1000 );
                                     var message_for_user = JSON.stringify({
                                         msg_type: "channel_init_reply",
                                         msg_value: 'fee invoice is paid',
@@ -3821,8 +3821,8 @@
                                     <div class="user_id"></div>
                                     <div class="label bold">Last activity</div>
                                     <div class="last_activity"></div>
-                                    <div class="label bold">Number of payments</div>
-                                    <div class="num_of_payments">0</div>
+                                    <div class="label bold">Status</div>
+                                    <div class="status">loading...</div>
                                     <p><button class="close_channel">Close channel</button></p>
                                 </div>
                             `;
@@ -3839,11 +3839,16 @@
                     $$( '.user' ).forEach( item => {
                         var user_id = item.getAttribute( "data-user_id" );
                         item.getElementsByClassName( "close_channel" )[ 0 ].onclick = () => {
+                            //TODO: actually close the channel
                             showModal( `<p>Closing this user's channel:</p><p>${user_id}</p>` );
                         };
-                        var num_of_payments = comms_keys[ user_id ][ "num_of_payments" ];
-                        var prev_num_of_payments = Number( item.getElementsByClassName( "num_of_payments" )[ 0 ].innerText );
-                        if ( prev_num_of_payments !== num_of_payments ) item.getElementsByClassName( "num_of_payments" )[ 0 ].innerText = num_of_payments;
+
+                        //update the "status" line; get the user's last_service_payment value, and if the current time is more than last_service_payment + service_fee_interval, the status should be "Overdue" -- otherwise, the status should be "Paid up; next payment due <date time>"
+                        var last_service_payment = hedgehog_server.comms_keys[ user_id ].last_service_payment;
+                        var now = Math.floor( Date.now() / 1000 );
+                        if ( now > last_service_payment + hedgehog_server.service_fee_interval ) var status = "Overdue";
+                        else var status = `Paid up; next payment due ${new Date( ( last_service_payment + hedgehog_server.service_fee_interval ) * 1000 ).toLocaleDateString( "en-ca" )} ${new Date( ( last_service_payment + hedgehog_server.service_fee_interval ) * 1000 ).toLocaleTimeString()}`;
+                        item.getElementsByClassName( "status" )[ 0 ].innerText = status;
                         //do nothing further if the user hasn't updated recently
                         var last_activity_timestamp = comms_keys[ user_id ][ "last_activity" ];
                         var prev_last_activity = Number( item.getElementsByClassName( "last_activity" )[ 0 ].getAttribute( "data-last_activity_timestamp" ) );
@@ -3853,7 +3858,7 @@
                         var last_activity_time = new Date( last_activity_timestamp * 1000 ).toLocaleTimeString();
                         item.getElementsByClassName( "last_activity" )[ 0 ].innerText = `${last_activity_date} ${last_activity_time}`;
                     });
-                    setTimeout( () => {usersLoop( comms_keys )}, 1000 );
+                    setTimeout( () => {usersLoop( comms_keys )}, 10_000 );
                 }
                 usersLoop( hedgehog_server.comms_keys );
                 hedgehog_server.setUpComms();
