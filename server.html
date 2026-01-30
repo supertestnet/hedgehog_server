@@ -2173,7 +2173,10 @@
                 inbound_capacity_fee: 330, //if you set a fee of 1 and set 'absolute' below, you will charge 1 sat per channel regardless of its size; if you set a fee of 1 and set 'percent' below, you will charge 1% of the channel capacity instead
                 inbound_capacity_fee_type: "absolute", //can be 'absolute' or change to 'percent'
                 server_id: null,
-                service_fee_interval: 300,
+                subscription_info: {
+                    interval: 300,
+                    cost: 2000,
+                },
                 isValidHex: hex => {
                     if ( !hex ) return;
                     var length = hex.length;
@@ -2201,6 +2204,7 @@
                                 var { chan_id } = json.msg_value;
                                 chan_id = "b_" + chan_id.substring( 2 );
                                 if ( !hedgehog.state.hasOwnProperty( chan_id ) ) return;
+                                if ( !hedgehog_server.comms_keys.hasOwnProperty( chan_id ) ) return;
                                 var now = Math.floor( Date.now() / 1000 );
                                 //ignore the ping if you've set the user's timestamp in the future
                                 //you do this if you recently asked them to resolve an htlc, see asyncResolvingLoop
@@ -2739,7 +2743,7 @@
                                 //send the data to the user
                                 var message_for_user = JSON.stringify({
                                     msg_type: "channel_request_reply",
-                                    msg_value: hedgehog_server.data_for_channel_opens[ event.pubkey ],
+                                    msg_value: {...hedgehog_server.data_for_channel_opens[ event.pubkey ], subscription_required: !!hedgehog_server.subscription_info.interval, subscription_start_time: !!hedgehog_server.subscription_info.interval ? Math.floor( Date.now() / 1000 ) + hedgehog_server.subscription_info.interval : undefined},
                                 });
                                 var privkey = hedgehog_server.nostr_privkey;
                                 var pubkey = nostr_pubkey;
@@ -2831,8 +2835,7 @@
                                 console.log( funding_txhex );
                                 var my_network = network_string.split( "," );
                                 var txhex = await chain_client.commander( my_network, "broadcast", funding_txhex );
-                                if ( hedgehog_server.isValidHex( txhex ) ) console.log( 'success!' );
-                                else console.log( `error: ${txhex}` );
+                                if ( !hedgehog_server.isValidHex( txhex ) ) console.log( `error: ${txhex}` );
                                 return;
                             }
                             if ( json.msg_type === "request_hh_pmt_to_user" ) {
@@ -2910,7 +2913,7 @@
                                     delete hedgehog_server.pmthashes_with_htlcs_that_need_resolving[ pmthash ];
                                     return `error: ${success_pmthash}`;
                                 }
-                                console.log( 'htlc is sent' );
+                                return;
                             }
                             if ( json.msg_type === "request_l1_pmt_to_user" ) {
                                 //prepare the needed variables
@@ -2945,7 +2948,6 @@
                                 //wait til swap address is funded
                                 var my_network = network_string.split( "," );
                                 var loop = async () => {
-                                    console.log( `checking if swap address got funded: ${swap_address}` );
                                     var utxos = await chain_client.commander( my_network, "utxos", swap_address );
                                     var sum_of_utxos = 0;
                                     utxos.forEach( utxo => sum_of_utxos = sum_of_utxos + utxo.value );
@@ -2954,7 +2956,6 @@
                                     return loop();
                                 }
                                 var swap_address_got_funded = await loop();
-                                console.log( 'yay, the swap address got funded!' );
 
                                 //tell user invoice is paid
                                 var message_for_user = JSON.stringify({
@@ -3032,7 +3033,6 @@
                                 loop();
                                 var success_pmthash = await hedgehog.sendHtlc( chan_id, htlc_amnt, relative_timelock, absolute_timelock, htlc_pmthash, block_when_i_must_force_close );
                                 if ( success_pmthash !== swap_address_hash ) return console.log( `error: ${success_pmthash}` );
-                                console.log( 'htlc is sent' );
                                 return;
                             }
                             if ( json.msg_type === "request_ln_pmt_to_user" ) {
@@ -3120,7 +3120,6 @@
                                 var absolute_timelock = 0;
                                 var success_pmthash = await hedgehog.sendHtlc( chan_id, htlc_amnt, relative_timelock, absolute_timelock, htlc_pmthash, block_when_i_must_force_close );
                                 if ( success_pmthash !== ln_invoice_pmthash ) return console.log( `error: ${success_pmthash}` );
-                                console.log( 'htlc is sent' );
                                 return;
                             }
                             if ( json.msg_type === "resolve_htlc_to_user_part_one" ) {
@@ -3161,7 +3160,6 @@
                                 });
 
                                 //settle any L1 swap addresses that use that preimage
-                                console.log( 'got the preimage to this pmthash:', pmthash, hedgehog_server.swap_contracts.hasOwnProperty( pmthash ), hedgehog_server.swap_contracts );
                                 if ( hedgehog_server.swap_contracts.hasOwnProperty( pmthash ) ) hedgehog_server.swap_contracts[ pmthash ] = preimage;
 
                                 //find the corresponding htlc
@@ -3524,8 +3522,6 @@
                     hedgehog_server.sendEvent( event, hedgehog_server.nostr_relays[ 0 ] );
                 },
                 asyncResolvingLoop: async () => {
-                    console.log( 'time to resolve!' );
-                    console.log( hedgehog_server.channels_with_htlcs_that_need_resolving );
                     var channels_with_htlcs = Object.keys( hedgehog_server.channels_with_htlcs_that_need_resolving );
                     var i; for ( i=0; i<channels_with_htlcs.length; i++ ) {
                         var chan_id = channels_with_htlcs[ i ];
@@ -3761,6 +3757,7 @@
                     ln_support: false,
                     use_rest: hedgehog_server.use_rest,
                     rest_endpoint: hedgehog_server.use_rest ? hedgehog_server.rest_endpoint : undefined,
+                    subscription_info: hedgehog_server.subscription_info,
                 }) );
                 console.log( 'setting up testnet...' );
                 var promiseA = async () => {
@@ -3843,11 +3840,11 @@
                             showModal( `<p>Closing this user's channel:</p><p>${user_id}</p>` );
                         };
 
-                        //update the "status" line; get the user's last_service_payment value, and if the current time is more than last_service_payment + service_fee_interval, the status should be "Overdue" -- otherwise, the status should be "Paid up; next payment due <date time>"
+                        //update the "status" line; get the user's last_service_payment value, and if the current time is more than last_service_payment + hedgehog_server.subscription_info.interval, the status should be "Overdue" -- otherwise, the status should be "Paid up; next payment due <date time>"
                         var last_service_payment = hedgehog_server.comms_keys[ user_id ].last_service_payment;
                         var now = Math.floor( Date.now() / 1000 );
-                        if ( now > last_service_payment + hedgehog_server.service_fee_interval ) var status = "Overdue";
-                        else var status = `Paid up; next payment due ${new Date( ( last_service_payment + hedgehog_server.service_fee_interval ) * 1000 ).toLocaleDateString( "en-ca" )} ${new Date( ( last_service_payment + hedgehog_server.service_fee_interval ) * 1000 ).toLocaleTimeString()}`;
+                        if ( now > last_service_payment + hedgehog_server.subscription_info.interval ) var status = "Overdue";
+                        else var status = `Paid up; next payment due ${new Date( ( last_service_payment + hedgehog_server.subscription_info.interval ) * 1000 ).toLocaleDateString( "en-ca" )} ${new Date( ( last_service_payment + hedgehog_server.subscription_info.interval ) * 1000 ).toLocaleTimeString()}`;
                         item.getElementsByClassName( "status" )[ 0 ].innerText = status;
                         //do nothing further if the user hasn't updated recently
                         var last_activity_timestamp = comms_keys[ user_id ][ "last_activity" ];
