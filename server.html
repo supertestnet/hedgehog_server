@@ -20,6 +20,7 @@
                 keypairs: {},
                 network: "testnet",
                 backup_pubkey: "a".repeat( 64 ),
+                anchor_value: 0,
                 hexToBytes: hex => Uint8Array.from( hex.match( /.{1,2}/g ).map( byte => parseInt( byte, 16 ) ) ),
                 bytesToHex: bytes => bytes.reduce( ( str, byte ) => str + byte.toString( 16 ).padStart( 2, "0" ), "" ),
                 getPrivkey: () => hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ),
@@ -214,8 +215,8 @@
 
                     //prepare the vouts
                     var vout = [
-                        hedgehog.getVout( state.funding_txinfo[ 2 ] - 240, midstate ),
-                        hedgehog.getVout( 240, "51024e73" ),
+                        hedgehog.getVout( state.funding_txinfo[ 2 ] - hedgehog.anchor_value, midstate ),
+                        hedgehog.getVout( hedgehog.anchor_value, "51024e73" ),
                     ];
 
                     //modify the vouts to include all pending htlcs
@@ -227,14 +228,14 @@
                             amnt_to_subtract_from_main_amnt = amnt_to_subtract_from_main_amnt + amnt;
                         });
                         if ( htlc_addy_and_amnt ) amnt_to_subtract_from_main_amnt = amnt_to_subtract_from_main_amnt + htlc_addy_and_amnt[ 1 ];
-                        vout[ 0 ] = hedgehog.getVout( state.funding_txinfo[ 2 ] - 240 - amnt_to_subtract_from_main_amnt, midstate );
+                        vout[ 0 ] = hedgehog.getVout( state.funding_txinfo[ 2 ] - hedgehog.anchor_value - amnt_to_subtract_from_main_amnt, midstate );
                     }
 
                     //if the payment creates a new htlc, modify the vouts to include it
                     if ( htlc_addy_and_amnt ) {
                         var [ htlc_address, htlc_amnt ] = htlc_addy_and_amnt;
                         vout.push( hedgehog.getVout( htlc_amnt, htlc_address ) );
-                        if ( !extra_outputs.length ) vout[ 0 ] = hedgehog.getVout( state.funding_txinfo[ 2 ] - 240 - htlc_amnt, midstate );
+                        if ( !extra_outputs.length ) vout[ 0 ] = hedgehog.getVout( state.funding_txinfo[ 2 ] - hedgehog.anchor_value - htlc_amnt, midstate );
                     }
 
                     //prepare and return tx1
@@ -270,10 +271,10 @@
                         var bobs_amnt = total_in_channel - recipients_new_balance;
                     }
 
-                    //account for the loss of 480 sats due to anchor outputs
-                    //note that 240 is the dust limit for v3 "anchor outputs"
-                    if ( sender_is_alice ) alices_amnt = alices_amnt - 240 - 240;
-                    else bobs_amnt = bobs_amnt - 240 - 240;
+                    //account for the loss of ( hedgehog.anchor_value + hedgehog.anchor_value ) sats due to anchor outputs
+                    //note that hedgehog.anchor_value is the dust limit for v3 "anchor outputs"
+                    if ( sender_is_alice ) alices_amnt = alices_amnt - hedgehog.anchor_value - hedgehog.anchor_value;
+                    else bobs_amnt = bobs_amnt - hedgehog.anchor_value - hedgehog.anchor_value;
 
                     //subtract alice's htlcs from her amount and bob's htlcs from his
                     alices_amnt = alices_amnt - sum_of_alices_htlcs;
@@ -286,7 +287,7 @@
                             hedgehog.getVin( tx1_txid, 0, amnt_in_output_0, midstate, 3 ),
                         ],
                         vout: [
-                            hedgehog.getVout( 240, "51024e73" ),
+                            hedgehog.getVout( hedgehog.anchor_value, "51024e73" ),
                         ],
                     });
                     //note that 330 sats is the dust limit for taproot addresses other than anchor outputs
@@ -368,7 +369,7 @@
                         var recipients_old_balance = am_alice ? balances[ 0 ] : balances[ 1 ];
                     }
                     var recipients_new_balance = recipients_old_balance + amnt;
-                    if ( !state.channel_states.length ) recipients_new_balance = recipients_new_balance - 240 - 240;
+                    if ( !state.channel_states.length ) recipients_new_balance = recipients_new_balance - hedgehog.anchor_value - hedgehog.anchor_value;
 
                     //if the user was the last to send, modify recipients_new_balance so that it is
                     //the previous amount sent plus the new amount -- unless the last transaction
@@ -377,10 +378,10 @@
                         var prev_state = state.channel_states[ state.channel_states.length - 1 ];
                         var prev_update_added_htlc = prev_state.added_htlc;
                         if ( !prev_update_added_htlc ) {
-                            var amnt_recipient_had = prev_state.amnt + 240 + 240 - prev_state.amnt_sent;
+                            var amnt_recipient_had = prev_state.amnt + hedgehog.anchor_value + hedgehog.anchor_value - prev_state.amnt_sent;
                             var amnt_sent_previously = prev_state.amnt_sent;
                             if ( am_sender ) amnt = amnt_sent_previously + amnt;
-                            var recipients_new_balance = amnt_recipient_had + amnt - 240 - 240;
+                            var recipients_new_balance = amnt_recipient_had + amnt - hedgehog.anchor_value - hedgehog.anchor_value;
                         }
                     }
 
@@ -434,8 +435,8 @@
                     var last_sender = prev_state.from;
                     var last_senders_amount = total_in_channel - prev_state.amnt;
                     var htlc_was_added = prev_state.added_htlc;
-                    var balances = [ last_senders_amount, prev_state.amnt + 240 + 240 ];
-                    if ( last_sender !== "alice" ) balances = [ prev_state.amnt + 240 + 240, last_senders_amount ];
+                    var balances = [ last_senders_amount, prev_state.amnt + hedgehog.anchor_value + hedgehog.anchor_value ];
+                    if ( last_sender !== "alice" ) balances = [ prev_state.amnt + hedgehog.anchor_value + hedgehog.anchor_value, last_senders_amount ];
                     return balances;
                 },
                 conditionalRevocationNeeded: ( chan_id, am_sender ) => {
@@ -794,7 +795,7 @@
                 prepareHtlcPartOne: async ( chan_id, amnt, pmthash, am_sender, recipients_revhashes, s_recovery_p2_revhash, s_midstate_revhash, relative_timelock, absolute_timelock ) => {
                     //the minimum htlc amount is 330, because that is the
                     //dust limit for taproot addresses, but in our case
-                    //it is even lower: 330 + 240 -- because we use anchor
+                    //it is even lower: 330 + hedgehog.anchor_value -- because we use anchor
                     //outputs and thus we always need at least 570 sats as
                     //a minimum for each htlc
                     if ( amnt < 570 ) return console.log( "error: htlc limit too low" );
@@ -879,8 +880,8 @@
                             hedgehog.getVin( senders_version_of_tx1_txid, index_of_pending_htlc, amnt, senders_version_of_tx1.vout[ index_of_pending_htlc ].scriptPubKey ),
                         ],
                         vout: [
-                            hedgehog.getVout( amnt - 240, recovery_htlc_addy ),
-                            hedgehog.getVout( 240, "51024e73" ),
+                            hedgehog.getVout( amnt - hedgehog.anchor_value, recovery_htlc_addy ),
+                            hedgehog.getVout( hedgehog.anchor_value, "51024e73" ),
                         ],
                     });
                     var recipients_recovery_part_one_tx = tapscript.Tx.create({
@@ -889,8 +890,8 @@
                             hedgehog.getVin( recipients_version_of_tx1_txid, index_of_pending_htlc, amnt, recipients_version_of_tx1.vout[ index_of_pending_htlc ].scriptPubKey ),
                         ],
                         vout: [
-                            hedgehog.getVout( amnt - 240, recovery_htlc_addy ),
-                            hedgehog.getVout( 240, "51024e73" ),
+                            hedgehog.getVout( amnt - hedgehog.anchor_value, recovery_htlc_addy ),
+                            hedgehog.getVout( hedgehog.anchor_value, "51024e73" ),
                         ],
                     });
                     var senders_recovery_part_one_txid = tapscript.Tx.util.getTxid( senders_recovery_part_one_tx );
@@ -907,22 +908,22 @@
                         version: 3,
                         vin: [
                             //TODO: change the relative timelock from 3 to 2016
-                            hedgehog.getVin( senders_recovery_part_one_txid, 0, amnt - 240, recovery_htlc_addy, 3 ),
+                            hedgehog.getVin( senders_recovery_part_one_txid, 0, amnt - hedgehog.anchor_value, recovery_htlc_addy, 3 ),
                         ],
                         vout: [
-                            hedgehog.getVout( amnt - 240, senders_address ),
-                            hedgehog.getVout( 240, "51024e73" ),
+                            hedgehog.getVout( amnt - hedgehog.anchor_value, senders_address ),
+                            hedgehog.getVout( hedgehog.anchor_value, "51024e73" ),
                         ],
                     });
                     var recipients_recovery_part_three_tx = tapscript.Tx.create({
                         version: 3,
                         vin: [
                             //TODO: change the relative timelock from 3 to 2016
-                            hedgehog.getVin( recipients_recovery_part_one_txid, 0, amnt - 240, recovery_htlc_addy, 3 ),
+                            hedgehog.getVin( recipients_recovery_part_one_txid, 0, amnt - hedgehog.anchor_value, recovery_htlc_addy, 3 ),
                         ],
                         vout: [
-                            hedgehog.getVout( amnt - 240, senders_address ),
-                            hedgehog.getVout( 240, "51024e73" ),
+                            hedgehog.getVout( amnt - hedgehog.anchor_value, senders_address ),
+                            hedgehog.getVout( hedgehog.anchor_value, "51024e73" ),
                         ],
                     });
                     var senders_recovery_part_three_txid = tapscript.Tx.util.getTxid( senders_recovery_part_three_tx );
@@ -937,8 +938,8 @@
                             hedgehog.getVin( senders_version_of_tx1_txid, index_of_pending_htlc, amnt, senders_initial_htlc_addy ),
                         ],
                         vout: [
-                            hedgehog.getVout( amnt - 240, reveal_htlc_addy ),
-                            hedgehog.getVout( 240, "51024e73" ),
+                            hedgehog.getVout( amnt - hedgehog.anchor_value, reveal_htlc_addy ),
+                            hedgehog.getVout( hedgehog.anchor_value, "51024e73" ),
                         ],
                         locktime: absolute_timelock,
                     });
@@ -948,8 +949,8 @@
                             hedgehog.getVin( recipients_version_of_tx1_txid, index_of_pending_htlc, amnt, recipients_initial_htlc_addy ),
                         ],
                         vout: [
-                            hedgehog.getVout( amnt - 240, reveal_htlc_addy ),
-                            hedgehog.getVout( 240, "51024e73" ),
+                            hedgehog.getVout( amnt - hedgehog.anchor_value, reveal_htlc_addy ),
+                            hedgehog.getVout( hedgehog.anchor_value, "51024e73" ),
                         ],
                         locktime: absolute_timelock,
                     });
@@ -979,7 +980,7 @@
                 sendHtlc: async ( chan_id, amnt, relative_timelock, absolute_timelock = 0, pmthash, block_when_i_must_force_close ) => {
                     //the minimum htlc amount is 330, because that is the
                     //dust limit for taproot addresses, but in our case
-                    //it is even lower: 330 + 240 -- because we use anchor
+                    //it is even lower: 330 + hedgehog.anchor_value -- because we use anchor
                     //outputs and thus we always need at least 570 sats as
                     //a minimum for each htlc
                     if ( amnt < 570 ) return console.log( "error: htlc limit too low" );
@@ -1714,18 +1715,19 @@
                         var tx2_fee = tapscript.Tx.create({
                             version: 3,
                             vin: [
-                                hedgehog.getVin( tx2_txid, 0, 240, "51024e73" ),
+                                hedgehog.getVin( tx2_txid, 0, hedgehog.anchor_value, "51024e73" ),
                                 hedgehog.getVin( txid2, vout2, amnt2, addy ),
                             ],
                             vout: [{
                                 value: 0,
-                                scriptPubKey: [ "OP_RETURN", "" ],
+                                scriptPubKey: [ "OP_RETURN" ],
                             }],
                         });
                         var fee2_sig = tapscript.Signer.taproot.sign( privkey, tx2_fee, 1 ).hex;
                         tx2_fee.vin[ 1 ].witness = [ fee2_sig ];
 
                         //broadcast the transactions
+                        //TODO: if there were extra outputs, prepare to broadcast their sweep txs as their timeouts approach
                         return { alt_tx2, tx2_fee }
                     }
 
@@ -1817,11 +1819,11 @@
                     var tx1_fee = tapscript.Tx.create({
                         version: 3,
                         vin: [
-                            hedgehog.getVin( tx1_txid, 1, 240, "51024e73" ),
+                            hedgehog.getVin( tx1_txid, 1, hedgehog.anchor_value, "51024e73" ),
                             hedgehog.getVin( txid2, vout2, amnt2, addy ),
                         ],
                         vout: [
-                            hedgehog.getVout( amnt2 - 250, addy ),
+                            hedgehog.getVout( amnt2 - 500, addy ),
                         ],
                     });
                     var fee_sig = tapscript.Signer.taproot.sign( privkey, tx1_fee, 1 ).hex;
@@ -1833,12 +1835,12 @@
                     var tx2_fee = tapscript.Tx.create({
                         version: 3,
                         vin: [
-                            hedgehog.getVin( tx2_txid, 0, 240, "51024e73" ),
-                            hedgehog.getVin( tx1_fee_txid, 0, amnt2 - 250, addy ),
+                            hedgehog.getVin( tx2_txid, 0, hedgehog.anchor_value, "51024e73" ),
+                            hedgehog.getVin( tx1_fee_txid, 0, amnt2 - 500, addy ),
                         ],
                         vout: [{
                             value: 0,
-                            scriptPubKey: [ "OP_RETURN", "" ],
+                            scriptPubKey: [ "OP_RETURN" ],
                         }],
                     });
                     var fee2_sig = tapscript.Signer.taproot.sign( privkey, tx2_fee, 1 ).hex;
@@ -2027,9 +2029,9 @@
                             console.log( tapscript.Tx.encode( tx2_fee ).hex );
                         }
                         console.log( `alice got the amount she should, right?`, tx2.vout[ 1 ][ "value" ] === hedgehog.getBalances( a_chan_id )[ 0 ] );
-                        console.log( `bob got the amount he should, right?`, tx2.vout[ 2 ][ "value" ] === hedgehog.getBalances( a_chan_id )[ 1 ] - 480 );
+                        console.log( `bob got the amount he should, right?`, tx2.vout[ 2 ][ "value" ] === hedgehog.getBalances( a_chan_id )[ 1 ] - ( hedgehog.anchor_value + hedgehog.anchor_value ) );
                         test8 = "failed";
-                        if ( tx2.vout[ 1 ][ "value" ] === hedgehog.getBalances( a_chan_id )[ 0 ] && hedgehog.getBalances( a_chan_id )[ 1 ] - 480 ) test8 = "passed";
+                        if ( tx2.vout[ 1 ][ "value" ] === hedgehog.getBalances( a_chan_id )[ 0 ] && hedgehog.getBalances( a_chan_id )[ 1 ] - ( hedgehog.anchor_value + hedgehog.anchor_value ) ) test8 = "passed";
                     }
                     if ( b_force ) return { test0, test1, test2, test3, test4, test5, test6, test7, test8 };
 
@@ -2048,9 +2050,9 @@
                             console.log( 'broadcast this disappearance_tx transaction because Bob never broadcasted tx2:' );
                             console.log( tapscript.Tx.encode( disappearance_tx ).hex );
                         }
-                        console.log( 'alice can sweep everything after 2026 blocks, right?', disappearance_tx.vout[ 0 ].value === total_in_channel - 240 - 500 );
+                        console.log( 'alice can sweep everything after 2026 blocks, right?', disappearance_tx.vout[ 0 ].value === total_in_channel - hedgehog.anchor_value - 500 );
                         test9 = "failed";
-                        if ( disappearance_tx.vout[ 0 ].value === total_in_channel - 240 - 500 ) test9 = "passed";
+                        if ( disappearance_tx.vout[ 0 ].value === total_in_channel - hedgehog.anchor_value - 500 ) test9 = "passed";
                         if ( disappearance ) return { test0, test1, test2, test3, test4, test5, test6, test7, test8, test9 };
                     }
 
@@ -2079,9 +2081,9 @@
                             console.log( tapscript.Tx.encode( tx2_fee ).hex );
                         }
                         console.log( `alice got the amount she should, right?`, tx2.vout[ 1 ][ "value" ] === hedgehog.getBalances( b_chan_id )[ 0 ], tx2.vout[ 1 ][ "value" ], hedgehog.getBalances( b_chan_id )[ 0 ] );
-                        console.log( `bob got the amount he should, right?`, tx2.vout[ 2 ][ "value" ] === hedgehog.getBalances( b_chan_id )[ 1 ] - 480, tx2.vout[ 2 ][ "value" ], hedgehog.getBalances( b_chan_id )[ 1 ] );
+                        console.log( `bob got the amount he should, right?`, tx2.vout[ 2 ][ "value" ] === hedgehog.getBalances( b_chan_id )[ 1 ] - ( hedgehog.anchor_value + hedgehog.anchor_value ), tx2.vout[ 2 ][ "value" ], hedgehog.getBalances( b_chan_id )[ 1 ] );
                         test10 = "failed";
-                        if ( tx2.vout[ 1 ][ "value" ] === hedgehog.getBalances( b_chan_id )[ 0 ] && hedgehog.getBalances( b_chan_id )[ 1 ] - 480 ) test10 = "passed";
+                        if ( tx2.vout[ 1 ][ "value" ] === hedgehog.getBalances( b_chan_id )[ 0 ] && hedgehog.getBalances( b_chan_id )[ 1 ] - ( hedgehog.anchor_value + hedgehog.anchor_value ) ) test10 = "passed";
                         return { test0, test1, test2, test3, test4, test5, test6, test7, test8, test9, test10 }
                     }
 
