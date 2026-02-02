@@ -1642,6 +1642,7 @@
                             disappearance_tx.vin[ 0 ].witness = [ mysig, midstate_scripts[ 1 ], midstate_cblock ];
 
                             //broadcast the disappearance tx
+                            //TODO: if there were extra outputs, prepare to broadcast their sweep txs as their timeouts approach
                             return { disappearance_tx }
                         }
 
@@ -1677,6 +1678,7 @@
                             //broadcast the justice tx
                             console.log( 'broadcast this justice transaction:' );
                             console.log( tapscript.Tx.encode( justice_tx ).hex );
+                            //TODO: if there were extra outputs, prepare to broadcast their sweep txs as their timeouts approach
                             return { justice_tx }
                         }
 
@@ -2176,7 +2178,8 @@
                 inbound_capacity_fee_type: "absolute", //can be 'absolute' or change to 'percent'
                 server_id: null,
                 subscription_info: {
-                    interval: 300,
+                    // interval: 300,
+                    interval: 0,
                     cost: 2000,
                 },
                 isValidHex: hex => {
