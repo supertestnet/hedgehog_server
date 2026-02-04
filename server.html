@@ -2308,15 +2308,17 @@
                                     });
                                     if ( index_of_pending_htlc < 0 ) error = "irredeemable";
 
-                                    //check timelock info
-                                    var current_timestamp = Math.floor( Date.now() / 1000 );
-                                    var pending_htlc = extra_outputs[ index_of_pending_htlc ];
-                                    var htlcs_timelock = pending_htlc.absolute_timelock;
-                                    if ( htlcs_timelock !== check_absolute_timelock ) error = `irredeemable because your counterparty lied about the timelock`;
-                                    if ( htlcs_timelock > current_timestamp ) error = `irredeemable until ${htlcs_timelock}`;
+                                    if ( !error ) {
+                                        //check timelock info
+                                        var current_timestamp = Math.floor( Date.now() / 1000 );
+                                        var pending_htlc = extra_outputs[ index_of_pending_htlc ];
+                                        var htlcs_timelock = pending_htlc.absolute_timelock;
+                                        if ( htlcs_timelock !== check_absolute_timelock ) error = `irredeemable because your counterparty lied about the timelock`;
+                                        if ( htlcs_timelock > current_timestamp ) error = `irredeemable until ${htlcs_timelock}`;
 
-                                    //ensure amount matches
-                                    if ( pending_htlc.amnt !== check_amnt ) error = "irredeemable";
+                                        //ensure amount matches
+                                        if ( pending_htlc.amnt !== check_amnt ) error = "irredeemable";
+                                    }
                                 }
 
                                 var msg_for_counterparty = JSON.stringify({
@@ -3850,6 +3852,7 @@
                         var now = Math.floor( Date.now() / 1000 );
                         if ( now > last_service_payment + hedgehog_server.subscription_info.interval ) var status = "Overdue";
                         else var status = `Paid up; next payment due ${new Date( ( last_service_payment + hedgehog_server.subscription_info.interval ) * 1000 ).toLocaleDateString( "en-ca" )} ${new Date( ( last_service_payment + hedgehog_server.subscription_info.interval ) * 1000 ).toLocaleTimeString()}`;
+                        if ( !hedgehog_server.subscription_info.interval ) status = "No problems";
                         item.getElementsByClassName( "status" )[ 0 ].innerText = status;
                         //do nothing further if the user hasn't updated recently
                         var last_activity_timestamp = comms_keys[ user_id ][ "last_activity" ];
