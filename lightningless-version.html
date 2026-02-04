@@ -2176,7 +2176,6 @@
                 two_way_comms: {},
                 funded_checks: {},
                 unfunded_checks: {},
-                num_of_checks: 0,
                 ln_support: "unknown",
                 use_rest: "unknown",
                 rest_endpoint: null,
@@ -3340,7 +3339,6 @@
 
                     //create and sign a tx1 and tx2 based on that extra_outputs array, and with the value of the htlc added to your counterparty's side of the channel, and add the new state to your ch_states array
                     var amnt = amnt_of_pending_htlc;
-                    console.log( 'my revocation preimages:', state.alices_revocation_preimages, 'my revocation hashes:', state.alices_revocation_hashes );
                     var object_for_counterparty = await hedgehog.send( chan_id, amnt, new_extra_outputs );
                     object_for_counterparty[ "pmt_preimage" ] = preimage;
                     var pmt_preimage = preimage;
@@ -3548,7 +3546,6 @@
                         return;
                     }
                     var state = hedgehog.state[ chan_id ];
-                    var num_of_checks = hedgehog_client.num_of_checks;
                     var checks = Object.keys( hedgehog_client.funded_checks );
                     if ( !checks.length ) {
                         $( '.pending_checks' ).innerHTML = `[None]`;
@@ -3556,9 +3553,10 @@
                         hedgehog_client.handleChecksLoop();
                         return;
                     }
-                    hedgehog_client.num_of_checks = checks.length;
                     var all_html = document.createElement( "div" );
                     var state_changed = false;
+                    //the next line makes the app remove checks from display if they have been cashed -- the app only updates the display if the state_changed variable gets set to true, so I set it to true if there are more checks on display than there are in state
+                    if ( $$( '.check' ).length > Object.keys( hedgehog_client.funded_checks ).length ) state_changed = true;
                     var i; for ( i=0; i<checks.length; i++ ) {
                         var check_id = checks[ i ];
                         var check = hedgehog_client.funded_checks[ check_id ];
@@ -3609,20 +3607,25 @@
                         var div = document.createElement( "div" );
                         div.classList.add( "check" );
                         div.classList.add( check_id );
+                        div.setAttribute( "data-check_id", check_id );
                         div.setAttribute( "data-check_state", check_state );
                         div.innerHTML = check_html;
-                        div.getElementsByClassName( "void_this_check" )[ 0 ].onclick = () => {
+                        div.getElementsByClassName( "void_this_check" )[ 0 ].onclick = e => {
+                            var check_id = e.target.parentElement.parentElement.getAttribute( "data-check_id" );
                             showModal( `This button doesn't do anything yet` );
                         }
-                        div.getElementsByClassName( "view_check_qr" )[ 0 ].onclick = () => {
+                        div.getElementsByClassName( "view_check_qr" )[ 0 ].onclick = e => {
+                            var check_id = e.target.parentElement.parentElement.getAttribute( "data-check_id" );
                             var url = $( `.${check_id} .check_payment_string` ).innerText;
                             var qr = hedgehog_client.createQR( url.toUpperCase() );
                             var item = $( `.${check_id} .check_qr_code` );
+                            item.innerHTML = ``;
                             item.append( qr );
                             if ( item.classList.contains( "hidden" ) ) item.classList.remove( "hidden" );
                             else item.classList.add( "hidden" );
                         }
-                        div.getElementsByClassName( "view_payment_string" )[ 0 ].onclick = () => {
+                        div.getElementsByClassName( "view_payment_string" )[ 0 ].onclick = e => {
+                            var check_id = e.target.parentElement.parentElement.getAttribute( "data-check_id" );
                             var item = $( `.${check_id} .check_payment_string` );
                             if ( item.classList.contains( "hidden" ) ) item.classList.remove( "hidden" );
                             else item.classList.add( "hidden" );
@@ -4257,7 +4260,10 @@
                     subscription_string = subscription_string.substring( 3 );
                     var subscription_info = JSON.parse( hedgehog_client.hexToText( subscription_string ) );
                     var {start_time, interval, cost, listener, privkey_to_reply_with, num_of_payments} = subscription_info;
-                    var conf = confirm( `Someone wants to you to create a subscription. They want you to pay ${cost} sats every ${interval} seconds. Click ok if you want to subscribe, otherwise click cancel` );
+                    var now = Math.floor( Date.now() / 1000 );
+                    var time_til_start = start_time - now;
+                    var addendum = num_of_payments ? `${num_of_payments} payments of` : ``;
+                    var conf = confirm( `Someone wants to you to create a subscription. They want you to pay ${addendum} ${cost} sats every ${interval} seconds, starting in ${time_til_start} seconds. Click ok if you want to subscribe, otherwise click cancel` );
                     if ( !conf ) return showModal( `aborting because you did not want to pay the subscription` );
 
                     //create a subscription event
