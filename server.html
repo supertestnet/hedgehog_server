@@ -2748,7 +2748,7 @@
                                 //send the data to the user
                                 var message_for_user = JSON.stringify({
                                     msg_type: "channel_request_reply",
-                                    msg_value: {...hedgehog_server.data_for_channel_opens[ event.pubkey ], subscription_required: !!hedgehog_server.subscription_info.interval, subscription_start_time: !!hedgehog_server.subscription_info.interval ? Math.floor( Date.now() / 1000 ) + hedgehog_server.subscription_info.interval : undefined},
+                                    msg_value: {...hedgehog_server.data_for_channel_opens[ event.pubkey ], subscription_required: !!hedgehog_server.subscription_info.interval, subscription_start_time: !!hedgehog_server.subscription_info.interval ? Math.floor( Date.now() / 1000 ) + hedgehog_server.subscription_info.interval : undefined, privkey_to_reply_to_me_with: hedgehog.getPrivkey()},
                                 });
                                 var privkey = hedgehog_server.nostr_privkey;
                                 var pubkey = nostr_pubkey;
