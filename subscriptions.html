@@ -4,6 +4,7 @@
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, user-scalable=no">
         <title>Hedgehog Subscriptions</title>
+        <script src="file:///home/supertestnet/bitcoin_projects/testnet_generator/qrcode.js"></script>
         <script src="https://supertestnet.github.io/bankify/super_nostr.js"></script>
         <script src="https://bundle.run/noble-secp256k1@1.2.14"></script>
         <script src="https://bundle.run/bech32@2.0.0"></script>
@@ -15,6 +16,11 @@
                 nostr_privkey: null,
                 nostr_pubkey: null,
                 nostr_nprofile: null,
+                checks_available: {},
+                two_way_comms: {},
+                use_rest: "unknown",
+                rest_endpoint: "unknown",
+                waitSomeTime: num => new Promise( resolve => setTimeout( resolve, num ) ),
                 hexToBytes: hex => Uint8Array.from( hex.match( /.{1,2}/g ).map( byte => parseInt( byte, 16 ) ) ),
                 bytesToHex: bytes => bytes.reduce( ( str, byte ) => str + byte.toString( 16 ).padStart( 2, "0" ), "" ),
                 hexToText: hex => decodeURIComponent( hex.replace( /\s+/g, "" ).replace( /[0-9a-f]{2}/g, "%$&" ) ),
@@ -23,6 +29,26 @@
                     return Array.from( encoded )
                         .map( x => x.toString( 16 ).padStart( 2, "0" ) )
                         .join( "" );
+                },
+                sha256: async s => {
+                    if ( typeof s == "string" ) s = new TextEncoder().encode( s );
+                    var arr = await crypto.subtle.digest( 'SHA-256', s );
+                    return hedgehog_subscriptions.bytesToHex( new Uint8Array( arr ) );
+                },
+                createQR: content => {
+                    var dataUriPngImage = document.createElement( "img" ),
+                    s = QRCode.generatePNG( content, {
+                        ecclevel: "M",
+                        format: "html",
+                        fillcolor: "#FFFFFF",
+                        textcolor: "#000000",
+                        margin: 4,
+                        modulesize: 8,
+                    });
+                    dataUriPngImage.src = s;
+                    dataUriPngImage.className = "qr_code";
+                    dataUriPngImage.style.width = "100%";
+                    return dataUriPngImage;
                 },
                 convertNEvent: nevent => {
                     var arr = bech32.bech32.fromWords( bech32.bech32.decode( nevent, 100_000 ).words );
@@ -70,10 +96,12 @@
                     return nevent;
                 },
                 loadSubscription: async subscription_string => {
+                    hedgehog_subscriptions.handleChecksLoop();
                     $( '.subscription_string' ).innerText = subscription_string;
                     subscription_string = subscription_string.substring( 3 );
                     var subscription_info = JSON.parse( hedgehog_subscriptions.hexToText( subscription_string ) );
                     var {privkey_to_reply_with, privkey} = subscription_info;
+                    hedgehog_subscriptions.nostr_privkey = privkey;
                     var listenFunction = async socket => {
                         var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
                         var filter  = {}
@@ -97,13 +125,204 @@
                             socket.send( JSON.stringify( subscription ) );
                         }
                         if ( event.kind === 4 ) {
+                            if ( event.pubkey !== super_nostr.getPubkey( privkey_to_reply_with ) ) {
+                                hedgehog_subscriptions.two_way_comms[ "get_check_status_reply" ] = event;
+                                return;
+                            }
+                            var privkey = hedgehog_subscriptions.nostr_privkey;
                             var dmsg = await super_nostr.alt_decrypt( privkey, event.pubkey, event.content );
-                            console.log( dmsg );
+                            var check_id = dmsg;
+                            var [ check_privkey, check_relays ] = hedgehog_subscriptions.convertNEvent( check_id );
+                            var privkey = check_privkey;
+                            var check_pubkey = super_nostr.getPubkey( check_privkey );
+                            var check_relay = check_relays[ 0 ];
+                            var ids = null;
+                            var authors = [ check_pubkey ];
+                            var kinds = [ 16109 ];
+                            var until = null;
+                            var since = null;
+                            var limit = 1;
+                            var events = await super_nostr.getEvents( check_relay, ids, authors, kinds, until, since, limit );
+                            if ( !events.length ) $( '.check_info' ).innerHTML = `Sorry, someone sent you an uncashable check.`;
+                            var check = events[ 0 ];
+                            check.content = await super_nostr.alt_decrypt( check_privkey, check_pubkey, check.content );
+                            var json = JSON.parse( check.content );
+                            hedgehog_subscriptions.checks_available[ check_id ] = {...json, check_status: "ready_to_cash"};
                         }
                     }
+                    hedgehog_subscriptions.setUpRestLoop( handleFunction );
                     var relay = hedgehog_subscriptions.nostr_relays[ 0 ];
                     super_nostr.newPermanentConnection( relay, listenFunction, handleFunction );
-                }
+                },
+                handleChecksLoop: async () => {
+                    var checks = Object.keys( hedgehog_subscriptions.checks_available );
+                    if ( !checks.length ) {
+                        $( '.pending_checks' ).innerHTML = `[None]`;
+                        await hedgehog_subscriptions.waitSomeTime( 100 );
+                        hedgehog_subscriptions.handleChecksLoop();
+                        return;
+                    }
+                    var all_html = document.createElement( "div" );
+                    var state_changed = false;
+                    var i; for ( i=0; i<checks.length; i++ ) {
+                        var check_id = checks[ i ];
+                        var check = hedgehog_subscriptions.checks_available[ check_id ];
+                        //if the timelock is over two minutes passed, look up whether check is redeemable -- if not, do not display the check
+                        var now = Math.floor( Date.now() / 1000 );
+                        if ( now > check.check_absolute_timelock + 120 ) {
+                            //set up listener on nostr
+                            var socket = super_nostr.sockets[ Object.keys( super_nostr.sockets )[ 0 ] ].socket;
+                            var {check_server_id} = check;
+                            var server_info = JSON.parse( hedgehog_subscriptions.hexToText( check_server_id ) );
+                            var { connection_string, use_rest, rest_endpoint } = server_info;
+                            hedgehog_subscriptions.use_rest = use_rest;
+                            if ( use_rest ) hedgehog_subscriptions.rest_endpoint = rest_endpoint;
+                            var [ server, servers_relays ] = hedgehog_subscriptions.convertNEvent( connection_string );
+                            var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
+                            var filter  = {}
+                            filter.kinds = [ 4 ];
+                            filter.authors = [ server ];
+                            var subscription = [ "REQ", subId, filter ];
+                            socket.send( JSON.stringify( subscription ) );
+
+                            //ensure check is redeemable
+                            var privkey = hedgehog_subscriptions.nostr_privkey;
+                            var { check_amount: check_amnt, check_preimage, check_absolute_timelock, check_encrypted_chan_id: encrypted_chan_id, check_encryption_pubkey: encryption_pubkey, encrypted_channel_fee_data } = check;
+                            var check_pmthash = await hedgehog_subscriptions.sha256( hedgehog_subscriptions.hexToBytes( check_preimage ) );
+                            var server_pubkey = server;
+                            var msg_for_server = JSON.stringify({
+                                msg_type: "get_check_status",
+                                msg_value: { encrypted_chan_id, check_pmthash, check_amnt, encryption_pubkey, check_absolute_timelock },
+                            });
+                            var emsg = await super_nostr.alt_encrypt( privkey, server_pubkey, msg_for_server );
+                            var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server_pubkey ] ] );
+                            hedgehog_subscriptions.sendEvent( event, servers_relays[ 0 ] );
+
+                            //get the message from the server
+                            var message_identifier = "get_check_status_reply";
+                            delete hedgehog_subscriptions.two_way_comms[ message_identifier ];
+                            var loop = async () => {
+                                console.log( 'looking for status' );
+                                await hedgehog_subscriptions.waitSomeTime( 100 );
+                                if ( !hedgehog_subscriptions.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
+                                return hedgehog_subscriptions.two_way_comms[ message_identifier ];
+                            }
+                            var event = await loop();
+                            delete hedgehog_subscriptions.two_way_comms[ message_identifier ];
+
+                            event.content = await super_nostr.alt_decrypt( privkey, event.pubkey, event.content );
+                            var json = JSON.parse( event.content );
+                            if ( json.msg_value === "irredeemable" ) {
+                                delete hedgehog_subscriptions.checks_available[ check_id ];
+                                state_changed = true;
+                                continue;
+                            }
+                        }
+                        var url = `${window.location.protocol}//${window.location.hostname}/${window.location.pathname}#check=${check_id}`;
+                        var check_amount = check.check_amount;
+                        var check_state = JSON.stringify({
+                            amount: check_amount,
+                            status: check.check_status,
+                            url,
+                        });
+                        var prev_state = $( `.${check_id}` ) ? $( `.${check_id}` ).getAttribute( "data-check_state" ) : null;
+                        if ( check_state !== prev_state ) state_changed = true;
+                        var check_timelock = new Date( check.check_absolute_timelock * 1000 );
+                        check_timelock.setMinutes( check_timelock.getMinutes() - check_timelock.getTimezoneOffset() );
+                        var check_tl_date = check_timelock.toLocaleDateString( "en-ca" );
+                        var check_tl_time = check_timelock.toLocaleTimeString();
+                        var now = Math.floor( Date.now() / 1000 );
+                        if ( now < check.check_absolute_timelock ) check_status = "waiting for timelock";
+                        else check_status = "ready to cash";
+                        var check_html = `
+                            <div>Amount: <span class="check_amount">${check_amount}</span></div>
+                            <div>Timelock date: <span class="check_tl_date">${check_tl_date}</span></div>
+                            <div>Timelock time: <span class="check_tl_time">${check_tl_time}</span></div>
+                            <div>Status: <span class="check_status">${check_status}</span></div>
+                            <div><button class="check_btn cash_this_check">Cash this check</button></div>
+                            <div><button class="check_btn view_check_qr">View qr code</button></div>
+                            <div><button class="check_btn view_payment_string">View payment string</button></div>
+                            <div class="check_qr_code hidden"></div>
+                            <div class="check_payment_string hidden">${url}</div>
+                        `;
+                        var div = document.createElement( "div" );
+                        div.classList.add( "check" );
+                        div.classList.add( check_id );
+                        div.setAttribute( "data-check_id", check_id );
+                        div.setAttribute( "data-check_state", check_state );
+                        div.innerHTML = check_html;
+                        div.getElementsByClassName( "cash_this_check" )[ 0 ].onclick = () => {
+                            var check_id = e.target.parentElement.parentElement.getAttribute( "data-check_id" );
+                            alert( `This button doesn't do anything yet` );
+                        }
+                        div.getElementsByClassName( "view_check_qr" )[ 0 ].onclick = e => {
+                            var check_id = e.target.parentElement.parentElement.getAttribute( "data-check_id" );
+                            var url = $( `.${check_id} .check_payment_string` ).innerText;
+                            var qr = hedgehog_subscriptions.createQR( url.toUpperCase() );
+                            var item = $( `.${check_id} .check_qr_code` );
+                            item.innerHTML = ``;
+                            item.append( qr );
+                            if ( item.classList.contains( "hidden" ) ) item.classList.remove( "hidden" );
+                            else item.classList.add( "hidden" );
+                        }
+                        div.getElementsByClassName( "view_payment_string" )[ 0 ].onclick = e => {
+                            var check_id = e.target.parentElement.parentElement.getAttribute( "data-check_id" );
+                            var item = $( `.${check_id} .check_payment_string` );
+                            if ( item.classList.contains( "hidden" ) ) item.classList.remove( "hidden" );
+                            else item.classList.add( "hidden" );
+                        }
+                        all_html.append( div );
+                    }
+                    if ( state_changed ) {
+                        $( '.pending_checks' ).innerHTML = ``;
+                        $( '.pending_checks' ).append( all_html );
+                    }
+                    await hedgehog_subscriptions.waitSomeTime( 100 );
+                    hedgehog_subscriptions.handleChecksLoop();
+                },
+                sendEvent: async ( event, relay ) => {
+                    if ( hedgehog_subscriptions.use_rest === "unknown" ) return;
+                    if ( hedgehog_subscriptions.use_rest && !hedgehog_subscriptions.rest_endpoint ) return;
+                    if ( !hedgehog_subscriptions.use_rest ) {
+                        super_nostr.sendEvent( event, relay );
+                        return;
+                    }
+                    fetch( hedgehog_subscriptions.rest_endpoint + "/write", {
+                        method: "POST",
+                        headers: {"Content-type": "application/json"},
+                        body: JSON.stringify( event ),
+                    });
+                },
+                setUpRestLoop: async handleFunction => {
+                    var loop = async () => {
+                        if ( hedgehog_subscriptions.use_rest === true ) return;
+                        await hedgehog_subscriptions.waitSomeTime( 10 );
+                        return loop();
+                    }
+                    await loop();
+                    var loop = async handleFunction => {
+                        var nostr_privkey = hedgehog_subscriptions.nostr_privkey;
+                        var nostr_pubkey = super_nostr.getPubkey( nostr_privkey );
+                        var sig = await nobleSecp256k1.schnorr.sign( "a".repeat( 64 ), nostr_privkey );
+                        if ( !hedgehog_subscriptions.rest_endpoint ) {
+                            await hedgehog_subscriptions.waitSomeTime( 1_000 );
+                            return loop();
+                        }
+                        var data = await fetch( hedgehog_subscriptions.rest_endpoint + "/read", {
+                            method: "POST",
+                            headers: {
+                                "Content-type": "application/json"
+                            },
+                            body: JSON.stringify({sig, pubkey: nostr_pubkey}),
+                        });
+                        var json = await data.json();
+                        if ( json === "unknown error" ) return alert( 'unknown error with rest api' );
+                        json.forEach( item => handleFunction({ data: JSON.stringify( [ null, null, item ] )}) );
+                        await hedgehog_subscriptions.waitSomeTime( 1_000 );
+                        return loop( handleFunction );
+                    }
+                    loop( handleFunction );
+                },
             }
         </script>
         <style>
@@ -141,6 +360,25 @@
             }
             .bold {
                 font-weight: bold;
+            }
+            .check {
+                background-color: lightgreen;
+                padding: 1rem;
+                border: 1px solid green;
+                margin-bottom: 1rem;
+            }
+            .unfunded {
+                background-color: lightblue;
+            }
+            .check_btn, .check_qr_code, .check_payment_string {
+                margin-top: 1rem;
+            }
+            .check_qr_code {
+                max-width: 15rem;
+            }
+            .check_payment_string {
+                background-color: tan;
+                padding: 1rem;
             }
             @media screen and (max-width: 600px) {
             }
@@ -196,8 +434,8 @@
             <h1>Your subscription</h1>
             <p class="bold">Subscription string (share with sender)</p>
             <p class="subscription_string"></p>
-            <p class="bold">Pending payments</p>
-            <div class="pending_payments">[None yet]</div>
+            <p class="bold">Pending cheques</p>
+            <div class="pending_checks">[None]</div>
         </div>
     </body>
     <script>
@@ -219,6 +457,7 @@
         }
         $( '.make_subscription' ).onclick = () => {
             var start_time = Math.floor( new Date( $( '.start_date' ).value ).getTime() / 1000 );
+            var now = Math.floor( Date.now() / 1000 );
             var interval = Number( $( '.interval' ).value );
             var cost = Number( $( '.cost' ).value );
             var num_of_payments = $( '.num_of_payments' ).value ? Number( $( '.num_of_payments' ).value ) : undefined;
