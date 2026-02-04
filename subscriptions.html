@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, user-scalable=no">
+        <title>Hedgehog Subscriptions</title>
+        <script src="https://supertestnet.github.io/bankify/super_nostr.js"></script>
+        <script src="https://bundle.run/noble-secp256k1@1.2.14"></script>
+        <script src="https://bundle.run/bech32@2.0.0"></script>
+        <script>
+            var hedgehog_subscriptions = {
+                subscription_string: null,
+                // nostr_relays: [ "wss://relay.nuts.cash/" ],
+                nostr_relays: [ "ws://127.0.0.1:6969" ],
+                nostr_privkey: null,
+                nostr_pubkey: null,
+                nostr_nprofile: null,
+                hexToBytes: hex => Uint8Array.from( hex.match( /.{1,2}/g ).map( byte => parseInt( byte, 16 ) ) ),
+                bytesToHex: bytes => bytes.reduce( ( str, byte ) => str + byte.toString( 16 ).padStart( 2, "0" ), "" ),
+                hexToText: hex => decodeURIComponent( hex.replace( /\s+/g, "" ).replace( /[0-9a-f]{2}/g, "%$&" ) ),
+                textToHex: text => {
+                    var encoded = new TextEncoder().encode( text );
+                    return Array.from( encoded )
+                        .map( x => x.toString( 16 ).padStart( 2, "0" ) )
+                        .join( "" );
+                },
+                convertNEvent: nevent => {
+                    var arr = bech32.bech32.fromWords( bech32.bech32.decode( nevent, 100_000 ).words );
+                    var hex = hedgehog_subscriptions.bytesToHex( arr );
+                    if ( !hex.startsWith( "0020" ) ) var event_id = hex.substring( hex.length - 64 );
+                    else var event_id = hex.substring( 4, 68 );
+                    if ( !hex.startsWith( "0020" ) ) hex = hex.substring( 0, hex.length - 64 );
+                    else hex = hex.substring( 68 );
+                    var relays = [];
+                    var kind = null;
+                    var author = null;
+                    var loop = () => {
+                        if ( hex.startsWith( "03" ) ) {
+                            var kind_hex = hex.substring( 4, 12 );
+                            kind = parseInt( kind_hex, 16 );
+                            hex = hex.substring( 12 );
+                            loop();
+                        }
+                        if ( hex.startsWith( "02" ) ) {
+                            author = hex.substring( 4, 68 );
+                            hex = hex.substring( 68 );
+                            loop();
+                        }
+                        if ( hex.startsWith( "01" ) ) {
+                            var relay_length = parseInt( hex.substring( 2, 4 ), 16 );
+                            relays.push( hedgehog_subscriptions.hexToText( hex.substring( 4, 4 + relay_length * 2 ) ) );
+                            hex = hex.substring( 4 + relay_length * 2 );
+                            loop();
+                        }
+                    }
+                    loop();
+                    return [ event_id, relays, kind, author ];
+                },
+                convertPubkeyAndRelaysToNprofile: ( prefix, pubkey, relays ) => {
+                    var relays_str = "";
+                    relays.forEach( relay => {
+                        var relay_str = hedgehog_subscriptions.textToHex( relay );
+                        var len = ( relay_str.length / 2 ).toString( 16 );
+                        if ( len.length % 2 ) len = "0" + len;
+                        relays_str = relays_str + "01" + len + relay_str;
+                    });
+                    var hex = relays_str + "0020" + pubkey;
+                    var bytes = hedgehog_subscriptions.hexToBytes( hex );
+                    var nevent = bech32.bech32.encode( prefix, bech32.bech32.toWords( bytes ), 100_000 );
+                    return nevent;
+                },
+                loadSubscription: async subscription_string => {
+                    $( '.subscription_string' ).innerText = subscription_string;
+                    subscription_string = subscription_string.substring( 3 );
+                    var subscription_info = JSON.parse( hedgehog_subscriptions.hexToText( subscription_string ) );
+                    var {privkey_to_reply_with, privkey} = subscription_info;
+                    var listenFunction = async socket => {
+                        var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
+                        var filter  = {}
+                        filter.kinds = [ 16110 ];
+                        filter.authors = [ super_nostr.getPubkey( privkey_to_reply_with ) ];
+                        var subscription = [ "REQ", subId, filter ];
+                        socket.send( JSON.stringify( subscription ) );
+                    }
+                    var handleFunction = async message => {
+                        var [ type, subId, event ] = JSON.parse( message.data );
+                        if ( !event || event === true ) return;
+                        console.log( event );
+                        if ( event.kind === 16110 ) {
+                            var socket = super_nostr.sockets[ Object.keys( super_nostr.sockets )[ 0 ] ].socket;
+                            var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
+                            var filter  = {}
+                            filter.kinds = [ 4 ];
+                            filter.authors = [ super_nostr.getPubkey( privkey_to_reply_with ) ];
+                            filter[ "#e" ] = [ event.id ];
+                            var subscription = [ "REQ", subId, filter ];
+                            socket.send( JSON.stringify( subscription ) );
+                        }
+                        if ( event.kind === 4 ) {
+                            var dmsg = await super_nostr.alt_decrypt( privkey, event.pubkey, event.content );
+                            console.log( dmsg );
+                        }
+                    }
+                    var relay = hedgehog_subscriptions.nostr_relays[ 0 ];
+                    super_nostr.newPermanentConnection( relay, listenFunction, handleFunction );
+                }
+            }
+        </script>
+        <style>
+            * {
+                box-sizing: border-box;
+                font-size: 1.15rem;
+                font-family: Arial, sans-serif;
+            }
+            html {
+                max-width: 800px;
+                padding: 3rem 1rem;
+                margin: auto;
+                line-height: 1.25;
+                padding: 0;
+            }
+            body {
+                margin: 3rem 1rem;
+                word-wrap: break-word;
+            }
+            h1 {
+                font-size: 2rem;
+            }
+            h2 {
+                font-size: 1.5rem;
+            }
+            input {
+                line-height: 1.25;
+                width: 100%;
+                height: 1.8rem;
+                font-size: 1.15rem;
+                border: 1px solid grey;
+            }
+            .hidden {
+                display: none !important;
+            }
+            .bold {
+                font-weight: bold;
+            }
+            @media screen and (max-width: 600px) {
+            }
+        </style>
+        <script>
+            var $ = document.querySelector.bind( document );
+            var $$ = document.querySelectorAll.bind( document );
+            var url_params = new URLSearchParams( window.location.search );
+            var url_keys = url_params.keys();
+            var $_GET = {}
+            for ( var key of url_keys ) $_GET[ key ] = url_params.get( key );
+            var hash_arr = window.location.href.substring( window.location.href.indexOf( "#" ) ).split( "#" );
+            hash_arr.splice( 0, 1 );
+            var $_HASH = {}
+            hash_arr.forEach( item => {
+                var vals = item.split( "=" );
+                $_HASH[ vals[ 0 ] ] = vals[ 1 ];
+            });
+        </script>
+    </head>
+    <body>
+        <div class="webpage home_page">
+            <h1>Hedgehog Subscriptions</h1>
+            <p><button class="load_existing_subscription">Load existing subscription</button></p>
+            <p><button class="make_new_subscription">Make new subscription</button></p>
+        </div>
+        <div class="webpage load_page hidden">
+            <h1>Load subscription</h1>
+            <p>Enter a subscription string</p>
+            <p><input class="subscription_string_form"></p>
+            <p><button class="load_subscription">Load subscription</button></p>
+        </div>
+        <div class="webpage make_page hidden">
+            <h1>Make subscription</h1>
+            <p>Enter a start date/time</p>
+            <p><input class="start_date" type="datetime-local"></p>
+            <p>Select an interval between payments</p>
+            <select class="interval">
+                <option value="0">--- Select ---</option>
+                <option value="120">2 minutes</option>
+                <option value="300">5 minutes</option>
+                <option value="86400">1 day</option>
+                <option value="1209600">2 weeks</option>
+                <option value="2592000">30 days</option>
+            </select> 
+            <p>Enter the amount of sats you want per payment</p>
+            <p><input type="number" min="330" step="1" value="1000" class="cost"></p>
+            <p>(Optional) Enter the number of payments you want -- leave blank for an indefinite subscription</p>
+            <p><input type="number" min="1" step="1" class="num_of_payments"></p>
+            <p><button class="make_subscription">Make subscription request</button></p>
+        </div>
+        <div class="webpage subscription_page hidden">
+            <h1>Your subscription</h1>
+            <p class="bold">Subscription string (share with sender)</p>
+            <p class="subscription_string"></p>
+            <p class="bold">Pending payments</p>
+            <div class="pending_payments">[None yet]</div>
+        </div>
+    </body>
+    <script>
+        var showPage = page => {
+            $$( '.webpage' ).forEach( item => item.classList.add( "hidden" ) );
+            $( `.${page}` ).classList.remove( "hidden" );
+        }
+        if ( $_HASH[ "subscription_string" ] ) {
+            var subscription_string = $_HASH[ "subscription_string" ];
+            hedgehog_subscriptions.loadSubscription( subscription_string );
+            showPage( 'subscription_page' );
+        }
+        $( '.load_existing_subscription' ).onclick = () => showPage( 'load_page' );
+        $( '.make_new_subscription' ).onclick = () => showPage( 'make_page' );
+        $( '.load_subscription' ).onclick = () => {
+            var subscription_string = $( '.subscription_string_form' ).value;
+            hedgehog_subscriptions.loadSubscription( subscription_string );
+            showPage( 'subscription_page' );
+        }
+        $( '.make_subscription' ).onclick = () => {
+            var start_time = Math.floor( new Date( $( '.start_date' ).value ).getTime() / 1000 );
+            var interval = Number( $( '.interval' ).value );
+            var cost = Number( $( '.cost' ).value );
+            var num_of_payments = $( '.num_of_payments' ).value ? Number( $( '.num_of_payments' ).value ) : undefined;
+            hedgehog_subscriptions.nostr_privkey = super_nostr.getPrivkey();
+            hedgehog_subscriptions.nostr_pubkey = super_nostr.getPubkey( hedgehog_subscriptions.nostr_privkey );
+            hedgehog_subscriptions.nostr_nprofile = hedgehog_subscriptions.convertPubkeyAndRelaysToNprofile( "nprofile", hedgehog_subscriptions.nostr_pubkey, hedgehog_subscriptions.nostr_relays );
+            var subscription_request_json = {
+                start_time,
+                interval,
+                cost,
+                listener: hedgehog_subscriptions.nostr_nprofile,
+                num_of_payments,
+                privkey_to_reply_with: super_nostr.getPrivkey(),
+                //TODO: think about what to do about this -- storing the privkey here means that if the recipient publishes a subscription request, anyone can steal the subscription payments -- but separating it from here means they need to "log in" with two pieces of info, their privkey and their subscription string
+                privkey: hedgehog_subscriptions.nostr_privkey,
+            }
+            var subscription_string = "hs_" + hedgehog_subscriptions.textToHex( JSON.stringify( subscription_request_json ) );
+            var url = window.location.protocol + "//" + window.location.hostname + window.location.pathname + `#subscription_string=${subscription_string}`;
+            window.location.href = url;
+            window.location.reload();
+        }
+    </script>
+</html>
