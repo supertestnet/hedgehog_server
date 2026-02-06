@@ -2340,7 +2340,8 @@
                             }
                             if ( json.msg_type === "pay_ln_invoice_for_user" ) {
                                 //prepare requisite variables
-                                var { encrypted_chan_id, invoice, encryption_pubkey, message_identifier } = json.msg_value;
+                                var { encrypted_chan_id, invoice, encryption_pubkey, message_identifier, pubkey_to_reply_to } = json.msg_value;
+                                if ( !pubkey_to_reply_to ) return;
                                 var privkey = hedgehog_server.nostr_privkey;
                                 var user_pubkey = event.pubkey;
                                 var chan_id = await super_nostr.alt_decrypt( privkey, encryption_pubkey, encrypted_chan_id );
@@ -2428,8 +2429,8 @@
                                     });
                                     var privkey = hedgehog_server.nostr_privkey;
                                     var pubkey = nostr_pubkey;
-                                    var emsg = await super_nostr.alt_encrypt( privkey, event.pubkey, message_for_user );
-                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", event.pubkey ] ] );
+                                    var emsg = await super_nostr.alt_encrypt( privkey, pubkey_to_reply_to, message_for_user );
+                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", pubkey_to_reply_to ] ] );
                                     hedgehog_server.sendEvent( event, hedgehog_server.nostr_relays[ 0 ] );
                                 }
 
@@ -2441,8 +2442,8 @@
                                     });
                                     var privkey = hedgehog_server.nostr_privkey;
                                     var pubkey = nostr_pubkey;
-                                    var emsg = await super_nostr.alt_encrypt( privkey, event.pubkey, message_for_user );
-                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", event.pubkey ] ] );
+                                    var emsg = await super_nostr.alt_encrypt( privkey, pubkey_to_reply_to, message_for_user );
+                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", pubkey_to_reply_to ] ] );
                                     hedgehog_server.sendEvent( event, hedgehog_server.nostr_relays[ 0 ] );
                                 }
 
@@ -2466,8 +2467,8 @@
                                 });
                                 var privkey = hedgehog_server.nostr_privkey;
                                 var pubkey = nostr_pubkey;
-                                var emsg = await super_nostr.alt_encrypt( privkey, event.pubkey, message_for_user );
-                                var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", event.pubkey ] ] );
+                                var emsg = await super_nostr.alt_encrypt( privkey, pubkey_to_reply_to, message_for_user );
+                                var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", pubkey_to_reply_to ] ] );
                                 hedgehog_server.sendEvent( event, hedgehog_server.nostr_relays[ 0 ] );
 
                                 //ask your counterparty to resolve the htlc whenever they are online
