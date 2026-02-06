@@ -2778,6 +2778,9 @@
                         }
                         var event = await loop();
                         delete hedgehog_client.two_way_comms[ message_identifier ];
+
+                        //tell the user what's up -- recall that this modal only shows if an LN invoice is being received -- if a check is being redeemed there is a similar modal slightly further below that shows instead
+                        if ( !skip_to_resolution ) showModal( `<p>Payment detected -- bridging from LN to hedgehog, please wait</p>` );
                     }
 
                     //get the next message from the server
@@ -3303,7 +3306,7 @@
                     var message_identifier = hedgehog.getPrivkey();
                     var message_for_counterparty = JSON.stringify({
                         msg_type: "pay_ln_invoice_for_user",
-                        msg_value: {encrypted_chan_id, invoice, encryption_pubkey, message_identifier},
+                        msg_value: {encrypted_chan_id, invoice, encryption_pubkey, message_identifier, pubkey_to_reply_to: pubkey},
                     });
                     var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_counterparty );
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
@@ -3319,13 +3322,13 @@
                     var event = await loop();
                     delete hedgehog_client.two_way_comms[ message_identifier ];
 
+                    //display message to user
                     var status = JSON.parse( event.content ).msg_value.status;
                     if ( status.includes( "error" ) ) {
-                        //TODO: consider sanitizing the error
                         //TODO: resolve the htlc back to the sender
                         showModal( `<p>Your payment could not be completed, please try again</p>` );
                     }
-                    showModal( `<p>Success</p>` );
+                    showModal( `<p>Payment sent -- resolving htlc</p>` );
                 },
                 askServerToPayL1Address: async ( chan_id, pmthash, privkey ) => {
                     var senders_pubkey = super_nostr.getPubkey( privkey );
@@ -3450,7 +3453,8 @@
                     state.channel_states[ state.channel_states.length - 4 ].extra_outputs[ index_of_pending_htlc ].recipients_rev_preimages = recipients_rev_preimages;
                     hedgehog_client.removeCheck( pmt_preimage );
 
-                    console.log( 'htlc resolved' );
+                    //TODO: consider not showing this when a check is resolved. It can produce unexpected popups if several htlcs get resolved in a short time frame, such as if a user sets up several subscriptions, then turns off their device, then turns it back on later after several due dates have passed
+                    showModal( `<p>htlc resolved -- payment completed successfully</p>` );
                     return;
                 },
                 setUpComms: async () => {
@@ -3570,7 +3574,11 @@
                         var check_preimage = null;
                         var subscription_id = null;
                         var check_id = await hedgehog_client.makeCheck( chan_id, check_label, check_amount, check_preimage, subscription_id, check_absolute_timelock, include_channel_fee, channel_fee );
-                        hedgehog_client.fundCheck( check_id );
+                        var check_is_funded = await hedgehog_client.fundCheck( check_id );
+                        if ( check_is_funded ) {
+                            hedgehog_client.funded_checks[ check_id ].check_status = "ready to cash";
+                            modalVanish();
+                        }
                     }
                 },
                 handleChecksLoop: async () => {
@@ -3880,7 +3888,56 @@
                                             }
                                         }
                                         if ( $( '.check_to_ln' ) ) $( '.check_to_ln' ).onclick = async () => {
-                                            showModal( `This button doesn't do anything yet` );
+                                            //prepare requisite variables
+                                            var check_hex = hedgehog_client.textToHex( check.content );
+                                            var check_data = JSON.parse( hedgehog_client.hexToText( check_hex ) );
+                                            var { check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey } = check_data;
+                                            var check_pmthash = await hedgehog.sha256( hedgehog.hexToBytes( check_preimage ) );
+
+                                            //set up communications
+                                            hedgehog_client.nostr_privkey = hedgehog.getPrivkey();
+                                            var pubkey = hedgehog.getPubkey( hedgehog_client.nostr_privkey );
+                                            var server_info = JSON.parse( hedgehog_client.hexToText( url_params.server_id ) );
+                                            var {connection_string} = server_info;
+                                            if ( !connection_string.startsWith( "nprofile1" ) ) return alert( 'unknown error, try another method' );
+                                            var [ server, nostr_relays ] = hedgehog_client.convertNEvent( connection_string );
+                                            hedgehog_client.relays = nostr_relays;
+                                            hedgehog_client.server = server;
+                                            await hedgehog_client.listenForComms();
+
+                                            //get invoice from user
+                                            console.log( 'create an invoice with this custom preimage:' );
+                                            console.log( check_preimage );
+                                            console.log( 'and this payment hash:' );
+                                            console.log( check_pmthash );
+                                            var invoice = prompt( `create an invoice for ${check_amount} sats with a custom preimage consisting of the one in your console, and enter it here` );
+
+                                            //ask server to pay LN invoice
+                                            var message_identifier = hedgehog.getPrivkey();
+                                            var message_for_counterparty = JSON.stringify({
+                                                msg_type: "pay_ln_invoice_for_user",
+                                                msg_value: {encrypted_chan_id: check_encrypted_chan_id, invoice, encryption_pubkey: check_encryption_pubkey, message_identifier, pubkey_to_reply_to: pubkey},
+                                            });
+                                            var emsg = await super_nostr.alt_encrypt( privkey, server, message_for_counterparty );
+                                            var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
+                                            hedgehog_client.sendEvent( event, hedgehog_client.relays[ 0 ] );
+
+                                            //listen for reply
+                                            delete hedgehog_client.two_way_comms[ message_identifier ];
+                                            var loop = async () => {
+                                                await hedgehog_client.waitSomeTime( 100 );
+                                                if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
+                                                return hedgehog_client.two_way_comms[ message_identifier ];
+                                            }
+                                            var event = await loop();
+                                            delete hedgehog_client.two_way_comms[ message_identifier ];
+
+                                            var status = JSON.parse( event.content ).msg_value.status;
+                                            if ( status.includes( "error" ) ) {
+                                                //TODO: resolve the htlc back to the sender
+                                                showModal( `<p>Your payment could not be completed, please try again</p>` );
+                                            }
+                                            showModal( `<p>Payment completed successfully</p>` );
                                         }
                                     } else {
                                         hedgehog_client.showPage( "wallet_page" );
@@ -4026,6 +4083,7 @@
                         var check_id = Object.keys( hedgehog_client.unfunded_checks )[ i ];
                         var { absolute_timelock, preimage, subscription_id } = hedgehog_client.unfunded_checks[ check_id ];
                         if ( absolute_timelock >= soonest_due_date ) continue;
+                        if ( !subscription_id ) continue;
                         var num_of_funded_checks_in_this_subscription = hedgehog_client.subscriptions[ subscription_id ].funded_check_ids.length;
                         if ( num_of_funded_checks_in_this_subscription >= 12 ) continue;
                         soonest_due_date = absolute_timelock;
@@ -4261,7 +4319,7 @@
                     var {chan_id, check_amount, include_channel_fee, preimage, absolute_timelock} = check_data;
                     if ( include_channel_fee ) var {fee_preimage, fee_amount} = check_data;
                     var sum_needed = check_amount;
-                    if ( include_channel_fee ) sum_needed = sum_needed + channel_fee;
+                    if ( include_channel_fee ) sum_needed = sum_needed + fee_amount;
                     var balance = hedgehog_client.getBalance( chan_id )[ 0 ] - hedgehog_client.getBalance( chan_id )[ 1 ];
                     if ( sum_needed > balance ) {
                         hedgehog_client.funding_new_check = false;
@@ -4271,7 +4329,7 @@
                     await hedgehog_client.send( chan_id, check_amount, check_pmthash, absolute_timelock );
                     if ( include_channel_fee ) {
                         var fee_pmthash = await hedgehog.sha256( hedgehog.hexToBytes( fee_preimage ) );
-                        await hedgehog_client.send( chan_id, channel_fee_data.fee_amount, fee_pmthash );
+                        await hedgehog_client.send( chan_id, fee_amount, fee_pmthash );
                     }
                     check_data.status = "ready to cash";
                     hedgehog_client.funded_checks[ check_id ] = check_data;
