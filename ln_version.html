@@ -2423,7 +2423,6 @@
                             var use_ln = confirm( `click ok to receive via LN or cancel to receive via L1` );
                             if ( use_ln ) {
                                 showModal( `<p>loading...</p>` );
-                                //pass it into prepToReceiveLNPartOne
                                 hedgehog_client.prepToReceiveLNPartOne( chan_id, amnt_or_check );
                                 return;
                             }
@@ -2642,7 +2641,7 @@
                     $( '.open_channel' ).classList.add( "hidden" );
                 },
                 prepToReceiveL1PartOne: async ( chan_id, amount ) => {
-                    //in Part One we create a preimage, share its hash with the server, and get back a submarine swap address; our sender pays that, and we know the server cannot sweep the money from it without our preimage; then we prepare a new state for hedgehog using its receiveHtlcPartOne method, and then we run prepToReceiveLNPartTwo.
+                    //in Part One we create a preimage, share its hash with the server, and get back a submarine swap address; our sender pays that, and we know the server cannot sweep the money from it without our preimage; then we prepare a new state for hedgehog using its receiveHtlcPartOne method, and then we run prepToReceiveLNPartTwo, which is fine to do even though we are actually receiving on L1 because from that point on the procedure is the same.
 
                     //prepare the needed variables
                     var privkey = hedgehog_client.nostr_privkey;
@@ -2687,12 +2686,14 @@
                     var swap_address = json.msg_value.swap_address;
                     //TODO: validate that the swap address has the payment hash you expect
 
-                    //present the invoice to the user
+                    //present the swap address to the user
                     showModal( `<p>Pay this swap address</p><p>${swap_address}</p>` );
 
                     //get the message from the server
                     var message_identifier = "swap_address_funded";
                     delete hedgehog_client.two_way_comms[ message_identifier ];
+                    //note that the line above seems partially duplicated for the following reason: I used to have a line several codeblocks below this point which deleted "initial_send_htlc_message" from hedgehog_client.two_way_comms, but I suspect that the reason the page sometimes hangs at that step is this: when the user is waiting for the swap_address_funded message (expected here, in the current codeblock), sometimes the server manages to send *both* that message *and* the "initial_send_htlc_message" *before* the recipient gets to the step where he starts waiting for *that* message. And if that happens, then the "delete" line in that codeblock (further below) would delete the "initial_send_htlc_message" and cause the page to hang. So I moved the delete line up here to prevent that.
+                    delete hedgehog_client.two_way_comms[ "initial_send_htlc_message" ];
                     var loop = async () => {
                         await hedgehog_client.waitSomeTime( 100 );
                         if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
@@ -2706,7 +2707,7 @@
 
                     //get the next message from the server
                     var message_identifier = "initial_send_htlc_message";
-                    delete hedgehog_client.two_way_comms[ message_identifier ];
+                    //note that I used to have a line here that deleted "initial_send_htlc_message" from hedgehog_client.two_way_comms, but I suspect that the reason the page sometimes hangs at this step is this: when the user is waiting for the swap_address_funded message, sometimes the server manages to send *both* that message *and* the "initial_send_htlc_message" *before* the recipient gets to this step. And if that happens, then the "delete" line here would delete the "initial_send_htlc_message" and cause him to hang. So I moved the delete line up
                     var loop = async () => {
                         await hedgehog_client.waitSomeTime( 100 );
                         if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
@@ -2714,8 +2715,6 @@
                     }
                     var event = await loop();
                     delete hedgehog_client.two_way_comms[ message_identifier ];
-
-                    console.log( 'time to send info to server' );
 
                     //parse the message from the server
                     var json = JSON.parse( event.content );
@@ -2733,7 +2732,6 @@
                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
                     hedgehog_client.prepToReceiveLNPartTwo( privkey, chan_id, preimage, event );
                     hedgehog_client.sendEvent( event, hedgehog_client.relays[ 0 ] );
-                    console.log( 'sent' );
                 },
                 prepToReceiveLNPartOne: async ( chan_id, amount, skip_to_resolution ) => {
                     //in Part One we create a preimage, get an invoice from the server matching our invoice, and have the sender pay it, knowing the server cannot settle it without our preimage; then we prepare a new state for hedgehog using its receiveHtlcPartOne method, and then we run prepToReceiveLNPartTwo. We also have a parameter called "skip_to_resolution" and if it is *not* set, we run makeJITChannelPartTwo -- it seems to be set only when a check is being redeemed, so when a check is *not* being redeemed, i.e. it's just an ordinary LN payment, we used to always run makeJITChannelPartTwo -- which seemed strange; I eventually decided we should only do that if we don't have enough money in inbound capacity, so I fixed it, and now it is no longer strange
@@ -2795,6 +2793,8 @@
                         //get the message from the server
                         var message_identifier = "ln_invoice_paid";
                         delete hedgehog_client.two_way_comms[ message_identifier ];
+                        //note that the line above seems partially duplicated in the line below for the following reason: I used to have a line several codeblocks below this point which deleted "initial_send_htlc_message" from hedgehog_client.two_way_comms, but I suspect that the reason the page sometimes hangs at that step is this: when the user is waiting for the ln_invoice_paid message (expected here, in the current codeblock), sometimes the server manages to send *both* that message *and* the "initial_send_htlc_message" *before* the recipient gets to the step where he starts waiting for *that* message. And if that happens, then the "delete" line in that codeblock (further below) would delete the "initial_send_htlc_message" and cause the page to hang. So I moved the delete line up here to prevent that.
+                        delete hedgehog_client.two_way_comms[ "initial_send_htlc_message" ];
                         var loop = async () => {
                             await hedgehog_client.waitSomeTime( 100 );
                             if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
@@ -2808,8 +2808,9 @@
                     }
 
                     //get the next message from the server
-                    var message_identifier = "two_way_comms";
-                    delete hedgehog_client.two_way_comms[ message_identifier ];
+                    var message_identifier = "initial_send_htlc_message";
+                    //note that I used to have a line here that deleted "initial_send_htlc_message" from hedgehog_client.two_way_comms, but I suspect that the reason the page sometimes hangs at this step is this: when the user is waiting for the ln_invoice_paid message (which only happens if skip_to_resolution is unset), sometimes the server manages to send *both* that message *and* the "initial_send_htlc_message" *before* the recipient gets to this step. And if that happens, then the "delete" line here would delete the "initial_send_htlc_message" and cause him to hang. So I moved the delete line up. Note that I still delete the message if skip_to_resolution is set, because if it is set, then the codeblock that deletes it earlier doesn't run, thus there was no prior step where I waited for something that takes a meaningful amount of time, so deleting it here should be perfectly reasonable in that case
+                    if ( skip_to_resolution ) delete hedgehog_client.two_way_comms[ message_identifier ];
                     var loop = async () => {
                         await hedgehog_client.waitSomeTime( 100 );
                         if ( !hedgehog_client.two_way_comms.hasOwnProperty( message_identifier ) ) return loop();
@@ -3925,6 +3926,17 @@
                                             var { check_amount, check_preimage, check_absolute_timelock, check_server_id, check_encrypted_chan_id, check_encryption_pubkey } = check_data;
                                             var check_pmthash = await hedgehog.sha256( hedgehog.hexToBytes( check_preimage ) );
 
+                                            //get invoice from user
+                                            console.log( 'create an invoice with this custom preimage:' );
+                                            console.log( check_preimage );
+                                            console.log( 'and this payment hash:' );
+                                            console.log( check_pmthash );
+                                            var invoice = prompt( `create an invoice for ${check_amount} sats with a custom preimage consisting of the one in your console, and enter it here` );
+                                            var pmthash = hedgehog_client.getInvoicePmthash( invoice );
+                                            var amnt = hedgehog_client.getInvoiceAmount( invoice );
+                                            if ( amnt !== check_amount ) return alert( `that invoice was not valid because it requested the wrong amount, specifically, it requested ${amnt} sats instead of ${check_amount}. Make one for exactly the right amount and try again.` );
+                                            if ( pmthash !== check_pmthash ) return alert( `that invoice was not valid because it didn't use the custom preimage specified in your console. Make one using the right preimage and try again.` );
+
                                             //set up communications
                                             if ( !hedgehog_client.nostr_privkey ) hedgehog_client.nostr_privkey = hedgehog.getPrivkey();
                                             var pubkey_for_comms = hedgehog.getPubkey( hedgehog_client.nostr_privkey );
@@ -3935,13 +3947,6 @@
                                             hedgehog_client.relays = nostr_relays;
                                             hedgehog_client.server = server;
                                             await hedgehog_client.listenForComms();
-
-                                            //get invoice from user
-                                            console.log( 'create an invoice with this custom preimage:' );
-                                            console.log( check_preimage );
-                                            console.log( 'and this payment hash:' );
-                                            console.log( check_pmthash );
-                                            var invoice = prompt( `create an invoice for ${check_amount} sats with a custom preimage consisting of the one in your console, and enter it here` );
 
                                             //ask server to pay LN invoice
                                             var message_identifier = hedgehog.getPrivkey();
