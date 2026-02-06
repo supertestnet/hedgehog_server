@@ -5,12 +5,20 @@
         <meta name="viewport" content="width=device-width, user-scalable=no">
         <title>Hedgehog Server</title>
         <script src="file:///home/supertestnet/bitcoin_projects/testnet_generator/chain_client.js"></script>
+        <script src="file:///home/supertestnet/bitcoin_projects/testnet_generator/buffer.js"></script>
+        <script>var Buffer = buffer.Buffer;</script>
+        <script src="file:///home/supertestnet/bitcoin_projects/testnet_generator/bolt11.js"></script>
         <script src="file:///home/supertestnet/bitcoin_projects/testnet_generator/super_nostr.js"></script>
+        <script src="file:///home/supertestnet/bitcoin_projects/testnet_generator/nwcjs.js"></script>
         <script src="file:///home/supertestnet/bitcoin_projects/testnet_generator/tapscript@1.5.3"></script>
         <script src="file:///home/supertestnet/bitcoin_projects/testnet_generator/noble-secp256k1@1.2.14"></script>
         <script src="file:///home/supertestnet/bitcoin_projects/testnet_generator/bech32.js"></script>
         <!-- <script src="https://supertestnet.github.io/brick-wallet/chain_client.js"></script> -->
+        <!-- <script src="https://bundle.run/buffer@6.0.3"></script> -->
+        <!-- <script>var Buffer = buffer.Buffer;</script> -->
+        <!-- <script src="https://supertestnet.github.io/bolt11_browser/bolt11.js"></script> -->
         <!-- <script src="https://supertestnet.github.io/bankify/super_nostr.js"></script> -->
+        <!-- <script src="https://supertestnet.github.io/nwcjs/nwcjs.js"></script> -->
         <!-- <script src="https://unpkg.com/@cmdcode/tapscript@1.5.3"></script> -->
         <!-- <script src="https://bundle.run/noble-secp256k1@1.2.14"></script> -->
         <!-- <script src="https://bundle.run/bech32@2.0.0"></script> -->
@@ -21,6 +29,7 @@
                 network: "testnet",
                 backup_pubkey: "a".repeat( 64 ),
                 anchor_value: 0,
+                nwc_string: null,
                 hexToBytes: hex => Uint8Array.from( hex.match( /.{1,2}/g ).map( byte => parseInt( byte, 16 ) ) ),
                 bytesToHex: bytes => bytes.reduce( ( str, byte ) => str + byte.toString( 16 ).padStart( 2, "0" ), "" ),
                 getPrivkey: () => hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ),
@@ -2331,7 +2340,7 @@
                             }
                             if ( json.msg_type === "pay_ln_invoice_for_user" ) {
                                 //prepare requisite variables
-                                var { encrypted_chan_id, invoice, encryption_pubkey } = json.msg_value;
+                                var { encrypted_chan_id, invoice, encryption_pubkey, message_identifier } = json.msg_value;
                                 var privkey = hedgehog_server.nostr_privkey;
                                 var user_pubkey = event.pubkey;
                                 var chan_id = await super_nostr.alt_decrypt( privkey, encryption_pubkey, encrypted_chan_id );
@@ -2368,39 +2377,98 @@
 
                                 //pay the invoice
                                 //TODO: set a max outgoing fee and ensure you recoup it when settling the pending htlc
-                                var error = null;
-                                var method = "lnpay";
-                                var params = {
-                                    invoice,
-                                    password: electrum_alt_password,
-                                }
-                                queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+                                /*
+                                    //old manual version
+                                    console.log( 'pay this invoice:' );
+                                    console.log( invoice );
+                                    var status = prompt( `pay the invoice in your console and enter the preimage` );
 
-                                //check its status on loop
-                                var loop = async () => {
-                                    await super_nostr.waitSomeSeconds( 1 );
+                                    //old version where I used my queryElectrum software
                                     var error = null;
-                                    var method = "get_invoice";
+                                    var method = "lnpay";
                                     var params = {
-                                        invoice_id: pmthash,
+                                        invoice,
+                                        password: electrum_alt_password,
                                     }
-                                    var status = null;
-                                    var status_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
-                                    if ( status_data.error && status_data.error.message ) error = status_data.error.message;
-                                    else status = status_data.result;
-                                    if ( status && status.status_str === "Paid" ) return status.preimage;
-                                    if ( error ) return `error: ${error}`;
+                                    queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+
+                                    //check its status on loop
+                                    var loop = async () => {
+                                        await super_nostr.waitSomeSeconds( 1 );
+                                        var error = null;
+                                        var method = "get_invoice";
+                                        var params = {
+                                            invoice_id: pmthash,
+                                        }
+                                        var status = null;
+                                        var status_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+                                        if ( status_data.error && status_data.error.message ) error = status_data.error.message;
+                                        else status = status_data.result;
+                                        if ( status && status.status_str === "Paid" ) return status.preimage;
+                                        if ( error ) return `error: ${error}`;
+                                        return loop();
+                                    }
+                                    var status = await loop();
+                                    if ( status.startsWith( "error" ) ) {
+                                        console.log( 'error:', error );
+                                        return;
+                                    }
+                                */
+
+                                //ensure your LN balance is sufficient
+                                var nwc_string = hedgehog_server.nwc_string;
+                                var nwc_info = nwcjs.processNWCstring( nwc_string );
+                                var delay_tolerance = 6;
+                                var balance_data = await nwcjs.getBalance( nwc_info, delay_tolerance );
+                                if ( !balance_data.hasOwnProperty( "result" ) || !balance_data.result.hasOwnProperty( "balance" ) ) {
+                                    //return error message
+                                    var message_for_user = JSON.stringify({
+                                        msg_type: "pay_ln_invoice_for_user_reply",
+                                        msg_value: {status: "error -- server has no ln wallet loaded", message_identifier},
+                                    });
+                                    var privkey = hedgehog_server.nostr_privkey;
+                                    var pubkey = nostr_pubkey;
+                                    var emsg = await super_nostr.alt_encrypt( privkey, event.pubkey, message_for_user );
+                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", event.pubkey ] ] );
+                                    hedgehog_server.sendEvent( event, hedgehog_server.nostr_relays[ 0 ] );
+                                }
+
+                                if ( balance_data.result.balance < 1.01 * invoice_amnt ) {
+                                    //return error message
+                                    var message_for_user = JSON.stringify({
+                                        msg_type: "pay_ln_invoice_for_user_reply",
+                                        msg_value: {status: "error -- server has insufficient balance", message_identifier},
+                                    });
+                                    var privkey = hedgehog_server.nostr_privkey;
+                                    var pubkey = nostr_pubkey;
+                                    var emsg = await super_nostr.alt_encrypt( privkey, event.pubkey, message_for_user );
+                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", event.pubkey ] ] );
+                                    hedgehog_server.sendEvent( event, hedgehog_server.nostr_relays[ 0 ] );
+                                }
+
+                                //use NWC to pay the invoice
+                                nwcjs.tryToPayInvoice( nwc_info, invoice );
+                                var loop = async () => {
+                                    //TODO: return error message if the payment is not successful -- and also consider how to handle stuck payments
+                                    var delay_tolerance = 6;
+                                    var status = await nwcjs.checkInvoice( nwc_info, invoice, delay_tolerance );
+                                    if ( status.hasOwnProperty( "result" ) && status.result.hasOwnProperty( "preimage" ) && status.result.preimage.length === 64 ) return status.result.preimage;
+                                    await hedgehog_server.waitSomeTime( 5_000 );
                                     return loop();
                                 }
-                                var status = await loop();
-                                if ( status.startsWith( "error" ) ) {
-                                    console.log( 'error:', error );
-                                    return;
-                                }
-
-                                var preimage = status;
+                                var preimage = await loop();
                                 extra_outputs[ index_of_pending_htlc ].pmt_preimage = preimage;
-                                //TODO: return success message to whoever requested that this invoice be paid
+
+                                //return success message to whoever requested that this invoice be paid
+                                var message_for_user = JSON.stringify({
+                                    msg_type: "pay_ln_invoice_for_user_reply",
+                                    msg_value: {status: "success", message_identifier},
+                                });
+                                var privkey = hedgehog_server.nostr_privkey;
+                                var pubkey = nostr_pubkey;
+                                var emsg = await super_nostr.alt_encrypt( privkey, event.pubkey, message_for_user );
+                                var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", event.pubkey ] ] );
+                                hedgehog_server.sendEvent( event, hedgehog_server.nostr_relays[ 0 ] );
 
                                 //ask your counterparty to resolve the htlc whenever they are online
                                 if ( !hedgehog_server.channels_with_htlcs_that_need_resolving.hasOwnProperty( chan_id ) ) hedgehog_server.channels_with_htlcs_that_need_resolving[ chan_id ] = [];
@@ -3052,25 +3120,42 @@
                                 //prepare to make an ln invoice for the amount requested
                                 var htlc_amnt = json.msg_value.amount;
                                 if ( typeof htlc_amnt !== "number" ) return console.log( 'user sent invalid amount:', htlc_amnt, 'is not a number' );
-                                var ln_invoice_value = hedgehog_server.satsToBitcoin( htlc_amnt );
-                                ln_invoice_value = Number( ln_invoice_value );
-                                //TODO: actually calculate the txfee properly
-                                var txfee = 300;
 
-                                //make the ln invoice
-                                var error = null;
+                                //get ln invoice
+                                var nwc_string = hedgehog_server.nwc_string;
+                                var nwc_info = nwcjs.processNWCstring( nwc_string );
                                 var ln_invoice_pmthash = json.msg_value.hash;
-                                var method = 'add_hold_invoice';
                                 var min_cltv = 294;
-                                var params = {payment_hash: ln_invoice_pmthash, amount: ln_invoice_value, memo: "", min_final_cltv_expiry_delta: min_cltv};
-                                var ln_invoice_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
-                                console.log( ln_invoice_data );
-                                var ln_invoice = null;
-                                if ( ln_invoice_data.error && ln_invoice_data.error.message ) error = ln_invoice_data.error.message;
-                                else ln_invoice = ln_invoice_data.result.invoice;
+                                var desc = "";
+                                var desc_hash = "";
+                                var delay_tolerance = 6;
+                                var invoice_data = await nwcjs.makeHodlInvoice( nwc_info, htlc_amnt, ln_invoice_pmthash, min_cltv, desc, desc_hash, delay_tolerance );
+                                var ln_invoice = invoice_data.result.invoice;
 
                                 //TODO: if there is an error, return it
 
+                                /*
+                                    //old version where I used my queryElectrum software
+                                    var ln_invoice_value = hedgehog_server.satsToBitcoin( htlc_amnt );
+                                    ln_invoice_value = Number( ln_invoice_value );
+                                    //TODO: actually calculate the txfee properly
+                                    var txfee = 300;
+
+                                    //make the ln invoice
+                                    var error = null;
+                                    var ln_invoice_pmthash = json.msg_value.hash;
+                                    var method = 'add_hold_invoice';
+                                    var min_cltv = 294;
+                                    var params = {payment_hash: ln_invoice_pmthash, amount: ln_invoice_value, memo: "", min_final_cltv_expiry_delta: min_cltv};
+                                    var ln_invoice_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+                                    console.log( ln_invoice_data );
+                                    var ln_invoice = null;
+                                    if ( ln_invoice_data.error && ln_invoice_data.error.message ) error = ln_invoice_data.error.message;
+                                    else ln_invoice = ln_invoice_data.result.invoice;
+                                    //TODO: if there is an error, return it
+                                */
+
+                                //send ln invoice to user
                                 var message_for_user = JSON.stringify({
                                     msg_type: "ln_invoice_for_user",
                                     msg_value: {ln_invoice},
@@ -3081,24 +3166,37 @@
 
                                 //wait til ln invoice is pending
                                 var loop = async () => {
-                                    var error = null;
-                                    var method = "check_hold_invoice";
-                                    var params = {
-                                        payment_hash: ln_invoice_pmthash,
-                                    }
-                                    var ln_invoice_is_paid = null;
-                                    var ln_invoice_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
-                                    //TODO: ensure the amount received is equal to or greater than the amount requested
-                                    if ( ln_invoice_data.error && ln_invoice_data.error.message ) error = ln_invoice_data.error.message;
-                                    else ln_invoice_is_paid = ln_invoice_data.result.status === 'paid';
-
-                                    //TODO: if there is an error, return it
-
-                                    if ( ln_invoice_is_paid ) return;
-                                    await super_nostr.waitSomeSeconds( 1 );
+                                    var delay_tolerance = 6;
+                                    var status = await nwcjs.checkInvoice( nwc_info, ln_invoice, delay_tolerance );
+                                    console.log( status );
+                                    if ( status.hasOwnProperty( "result" ) && status.result.hasOwnProperty( "hodl_status" ) && typeof status.result.hodl_status === "string" && status.result.hodl_status.includes( "PAYMENT_DETECTED" ) && !status.result.hodl_status.includes( "NO_PAYMENT_DETECTED" ) ) return;
+                                    await hedgehog_server.waitSomeTime( 5_000 );
                                     return loop();
                                 }
                                 var ln_invoice_is_paid = await loop();
+
+                                /*
+                                    //old version where I used my queryElectrum software
+                                    var loop = async () => {
+                                        var error = null;
+                                        var method = "check_hold_invoice";
+                                        var params = {
+                                            payment_hash: ln_invoice_pmthash,
+                                        }
+                                        var ln_invoice_is_paid = null;
+                                        var ln_invoice_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+                                        //TODO: ensure the amount received is equal to or greater than the amount requested
+                                        if ( ln_invoice_data.error && ln_invoice_data.error.message ) error = ln_invoice_data.error.message;
+                                        else ln_invoice_is_paid = ln_invoice_data.result.status === 'paid';
+
+                                        //TODO: if there is an error, return it
+
+                                        if ( ln_invoice_is_paid ) return;
+                                        await super_nostr.waitSomeSeconds( 1 );
+                                        return loop();
+                                    }
+                                    var ln_invoice_is_paid = await loop();
+                                */
 
                                 //tell user invoice is paid
                                 var message_for_user = JSON.stringify({
@@ -3148,11 +3246,22 @@
                                 }
 
                                 //settle any inbound LN invoices that use that preimage
-                                var method = 'settle_hold_invoice';
-                                var params = {preimage};
                                 try {
-                                    //TODO: check if this is an L1 payment, and if so, sweep the funds from the swap address instead of querying electrum
-                                    queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+                                    var nwc_string = hedgehog_server.nwc_string;
+                                    var nwc_info = nwcjs.processNWCstring( nwc_string );
+                                    var delay_tolerance = 6;
+                                    nwcjs.settleHodlInvoice( nwc_info, preimage, delay_tolerance );
+                                    /*
+                                        //old manual version
+                                        console.log( 'settle the invoice with this preimage:' );
+                                        console.log( preimage );
+                                        alert( `click ok after you run settle_hodl_invoice <preimage> -- the preimage is in your console` );
+
+                                        //old version where I used my queryElectrum software
+                                        var method = 'settle_hold_invoice';
+                                        var params = {preimage};
+                                        queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+                                    */
                                 } catch ( e ) {}
 
                                 //settle any inbound HH htlcs that use that preimage
@@ -3756,12 +3865,13 @@
         </script>
         <script>
             var init = async() => {
+                hedgehog_server.nwc_string = prompt( `enter an nwc string` );
                 hedgehog_server.nostr_pubkey = super_nostr.getPubkey( hedgehog_server.nostr_privkey );
                 var server_id = hedgehog_server.textToHex( JSON.stringify({
                     connection_type: "nostr",
                     connection_string: hedgehog_server.convertPubkeyAndRelaysToNprofile( "nprofile", hedgehog_server.nostr_pubkey, hedgehog_server.nostr_relays ),
                     network_string: hedgehog_server.network_string,
-                    ln_support: false,
+                    ln_support: true,
                     use_rest: hedgehog_server.use_rest,
                     rest_endpoint: hedgehog_server.use_rest ? hedgehog_server.rest_endpoint : undefined,
                     subscription_info: hedgehog_server.subscription_info,
