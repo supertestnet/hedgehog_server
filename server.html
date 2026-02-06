@@ -3912,7 +3912,6 @@
             var init = async() => {
                 hedgehog_server.nwc_string = prompt( `enter an nwc string` );
                 if ( !hedgehog_server.nwc_string || !hedgehog_server.nwc_string.startsWith( "nostr+walletconnect://" ) ) return alert( 'that nwc string was not valid, try again' );
-                console.log( hedgehog_server.nwc_string, hedgehog_server.nwc_string.startsWith( "nostr+walletconnect://" ) );
                 hedgehog_server.nostr_pubkey = super_nostr.getPubkey( hedgehog_server.nostr_privkey );
                 var server_id = hedgehog_server.textToHex( JSON.stringify({
                     connection_type: "nostr",
