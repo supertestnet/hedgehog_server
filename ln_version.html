@@ -3351,6 +3351,7 @@
                     if ( status.includes( "error" ) ) {
                         //TODO: resolve the htlc back to the sender
                         showModal( `<p>Your payment could not be completed, please try again</p>` );
+                        return;
                     }
                     showModal( `<p>Payment sent -- resolving htlc</p>` );
                 },
