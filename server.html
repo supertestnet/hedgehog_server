@@ -2434,8 +2434,8 @@
                                     var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
                                     hedgehog_server.sendEvent( event, hedgehog_server.nostr_relays[ 0 ] );
                                 }
-
-                                if ( balance_data.result.balance < 1.01 * invoice_amnt ) {
+                                console.log( Math.floor( balance_data.result.balance / 1000 ), 1.01 * invoice_amnt );
+                                if ( Math.floor( balance_data.result.balance / 1000 ) < 1.01 * invoice_amnt ) {
                                     //return error message
                                     var message_for_user = JSON.stringify({
                                         msg_type: "pay_ln_invoice_for_user_reply",
@@ -3905,13 +3905,14 @@
             $( '.init' ).onclick = async () => {
                 showModal( `<p>loading...</p>` );
                 await init();
-                showPage( 'dashboard' );
                 modalVanish();
             }
         </script>
         <script>
             var init = async() => {
                 hedgehog_server.nwc_string = prompt( `enter an nwc string` );
+                if ( !hedgehog_server.nwc_string || !hedgehog_server.nwc_string.startsWith( "nostr+walletconnect://" ) ) return alert( 'that nwc string was not valid, try again' );
+                console.log( hedgehog_server.nwc_string, hedgehog_server.nwc_string.startsWith( "nostr+walletconnect://" ) );
                 hedgehog_server.nostr_pubkey = super_nostr.getPubkey( hedgehog_server.nostr_privkey );
                 var server_id = hedgehog_server.textToHex( JSON.stringify({
                     connection_type: "nostr",
@@ -4027,6 +4028,7 @@
                 hedgehog_server.asyncResolvingLoop();
                 hedgehog_server.server_id = server_id;
                 $( '.server_id' ).innerText = server_id;
+                showPage( 'dashboard' );
             }
         </script>
         <div class="black-bg hidden" onclick="modalVanish();"></div>
