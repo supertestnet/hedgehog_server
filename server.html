@@ -29,7 +29,6 @@
                 network: "testnet",
                 backup_pubkey: "a".repeat( 64 ),
                 anchor_value: 0,
-                nwc_string: null,
                 hexToBytes: hex => Uint8Array.from( hex.match( /.{1,2}/g ).map( byte => parseInt( byte, 16 ) ) ),
                 bytesToHex: bytes => bytes.reduce( ( str, byte ) => str + byte.toString( 16 ).padStart( 2, "0" ), "" ),
                 getPrivkey: () => hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ),
@@ -541,7 +540,7 @@
                     state.bobs_revocation_hashes.push( bobs_pubkey_and_hash[ 1 ] );
                     return chan_id;
                 },
-                openChannel: async ( bobs_pubkey_and_hash, txdata, data_from_alice, chan_id ) => {
+                openChannel: async ( bobs_pubkey_and_hash, txdata, data_from_alice, chan_id, skip_message ) => {
                     //if we pass in an existing chan_id then we skip the first few steps
                     //because only alice does that and she only does it if she already
                     //did the first few steps using the prepChannel() method
@@ -594,8 +593,10 @@
                         var channel = hedgehog.getAddressData( channel_scripts, 0 )[ 0 ];
 
                         //fund the channel
-                        console.log( 'send money to this channel address:' );
-                        console.log( channel );
+                        if ( !skip_message ) {
+                            console.log( 'send money to this channel address:' );
+                            console.log( channel );
+                        }
                         if ( txdata ) var [ txid, vout, amnt ] = txdata;
                         else {
                             var txid = prompt( `send money into the address in your console and enter the txid` );
@@ -2177,6 +2178,7 @@
                 utxos_privkey: null,
                 utxos_pubkey: null,
                 utxos_addy: null,
+                ln_support: true,
                 use_rest: true,
                 rest_endpoint: "http://localhost:8080",
                 swap_contracts: {},
@@ -2340,8 +2342,7 @@
                             }
                             if ( json.msg_type === "pay_ln_invoice_for_user" ) {
                                 //prepare requisite variables
-                                var { encrypted_chan_id, invoice, encryption_pubkey, message_identifier, pubkey_to_reply_to } = json.msg_value;
-                                if ( !pubkey_to_reply_to ) return;
+                                var { encrypted_chan_id, invoice, encryption_pubkey, message_identifier } = json.msg_value;
                                 var privkey = hedgehog_server.nostr_privkey;
                                 var user_pubkey = event.pubkey;
                                 var chan_id = await super_nostr.alt_decrypt( privkey, encryption_pubkey, encrypted_chan_id );
@@ -2429,8 +2430,8 @@
                                     });
                                     var privkey = hedgehog_server.nostr_privkey;
                                     var pubkey = nostr_pubkey;
-                                    var emsg = await super_nostr.alt_encrypt( privkey, pubkey_to_reply_to, message_for_user );
-                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", pubkey_to_reply_to ] ] );
+                                    var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
+                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
                                     hedgehog_server.sendEvent( event, hedgehog_server.nostr_relays[ 0 ] );
                                 }
 
@@ -2442,8 +2443,8 @@
                                     });
                                     var privkey = hedgehog_server.nostr_privkey;
                                     var pubkey = nostr_pubkey;
-                                    var emsg = await super_nostr.alt_encrypt( privkey, pubkey_to_reply_to, message_for_user );
-                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", pubkey_to_reply_to ] ] );
+                                    var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
+                                    var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
                                     hedgehog_server.sendEvent( event, hedgehog_server.nostr_relays[ 0 ] );
                                 }
 
@@ -2453,7 +2454,7 @@
                                     //TODO: return error message if the payment is not successful -- and also consider how to handle stuck payments
                                     var delay_tolerance = 6;
                                     var status = await nwcjs.checkInvoice( nwc_info, invoice, delay_tolerance );
-                                    if ( status.hasOwnProperty( "result" ) && status.result.hasOwnProperty( "preimage" ) && status.result.preimage.length === 64 ) return status.result.preimage;
+                                    if ( status.hasOwnProperty( "result" ) && status.result.hasOwnProperty( "preimage" ) && status.result.preimage.length === 64 && status.result.type === "outgoing" ) return status.result.preimage;
                                     await hedgehog_server.waitSomeTime( 5_000 );
                                     return loop();
                                 }
@@ -2467,8 +2468,8 @@
                                 });
                                 var privkey = hedgehog_server.nostr_privkey;
                                 var pubkey = nostr_pubkey;
-                                var emsg = await super_nostr.alt_encrypt( privkey, pubkey_to_reply_to, message_for_user );
-                                var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", pubkey_to_reply_to ] ] );
+                                var emsg = await super_nostr.alt_encrypt( privkey, user_pubkey, message_for_user );
+                                var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", user_pubkey ] ] );
                                 hedgehog_server.sendEvent( event, hedgehog_server.nostr_relays[ 0 ] );
 
                                 //ask your counterparty to resolve the htlc whenever they are online
@@ -2649,7 +2650,6 @@
                                         privkey: utxo.skey,
                                     });
                                 });
-                                console.log( utxos_available );
 
                                 //TODO: if there is an error, return it
 
@@ -2758,36 +2758,49 @@
                                     }
                                 }
 
-                                var fee_address = null;
-                                if ( need_fee_payment ) {
-                                    //prepare to make a "fee address" for the cost of the channel
-                                    var cost_of_channel = hedgehog_server.inbound_capacity_fee_type === "absolute" ? Number( hedgehog_server.inbound_capacity_fee ) : Number( ( Number( channel_capacity ) * Number( ( Number( hedgehog_server.inbound_capacity_fee ) / 100 ).toFixed( 2 ) ) ).toFixed( 2 ) );
-                                    var cost_of_fee_address = hedgehog_server.satsToBitcoin( cost_of_channel );
-                                    cost_of_fee_address = Number( cost_of_fee_address ).toFixed( 7 );
-                                    var fee_privkey = super_nostr.getPrivkey();
-                                    var fee_pubkey = super_nostr.getPubkey( fee_privkey );
-                                    var fee_address = tapscript.Address.fromScriptPubKey( [ 1, fee_pubkey ], hedgehog.network );
+                                if ( !hedgehog_server.ln_support ) {
+                                    var fee_address = null;
+                                    if ( need_fee_payment ) {
+                                        //prepare to make a "fee address" for the cost of the channel
+                                        var cost_of_channel = hedgehog_server.inbound_capacity_fee_type === "absolute" ? Number( hedgehog_server.inbound_capacity_fee ) : Number( ( Number( channel_capacity ) * Number( ( Number( hedgehog_server.inbound_capacity_fee ) / 100 ).toFixed( 2 ) ) ).toFixed( 2 ) );
+                                        var cost_of_fee_address = hedgehog_server.satsToBitcoin( cost_of_channel );
+                                        cost_of_fee_address = Number( cost_of_fee_address ).toFixed( 7 );
+                                        var fee_privkey = super_nostr.getPrivkey();
+                                        var fee_pubkey = super_nostr.getPubkey( fee_privkey );
+                                        var fee_address = tapscript.Address.fromScriptPubKey( [ 1, fee_pubkey ], hedgehog.network );
+                                    }
+                                } else {
+                                    // var fee_invoice = null;
+                                    if ( need_fee_payment ) {
+                                        //prepare to make a "fee invoice" for the cost of the channel
+                                        var cost_of_channel = hedgehog_server.inbound_capacity_fee_type === "absolute" ? Number( hedgehog_server.inbound_capacity_fee ) : Number( ( Number( channel_capacity ) * Number( ( Number( hedgehog_server.inbound_capacity_fee ) / 100 ).toFixed( 2 ) ) ).toFixed( 2 ) );
+                                        var fee_invoice_preimage = super_nostr.getPrivkey();
+                                        var fee_invoice_pmthash = await super_nostr.sha256( super_nostr.hexToBytes( fee_invoice_preimage ) );
+                                        var nwc_string = hedgehog_server.nwc_string;
+                                        var nwc_info = nwcjs.processNWCstring( nwc_string );
+                                        var min_cltv = 294;
+                                        var desc = "";
+                                        var desc_hash = "";
+                                        var delay_tolerance = 6;
+                                        var invoice_data = await nwcjs.makeHodlInvoice( nwc_info, cost_of_channel, fee_invoice_pmthash, min_cltv, desc, desc_hash, delay_tolerance );
+                                        var fee_invoice = invoice_data.result.invoice;
+
+                                        /*
+                                        //old version where I used my queryElectrum software
+                                        var cost_of_fee_invoice = hedgehog_server.satsToBitcoin( cost_of_channel );
+                                        cost_of_fee_invoice = Number( cost_of_fee_invoice );
+
+                                        //make the fee invoice
+                                        var method = 'add_hold_invoice';
+                                        var params = {payment_hash: fee_invoice_pmthash, amount: cost_of_fee_invoice, memo: ""};
+                                        var fee_invoice_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+                                        if ( fee_invoice_data.error && fee_invoice_data.error.message ) error = fee_invoice_data.error.message;
+                                        else fee_invoice = fee_invoice_data.result.invoice;
+                                        */
+
+                                        //TODO: if there is an error, return it                        
+                                    }
                                 }
-
-                                // var fee_invoice = null;
-                                // if ( need_fee_invoice ) {
-                                //     //prepare to make a "fee invoice" for the cost of the channel
-                                //     var cost_of_channel = hedgehog_server.inbound_capacity_fee_type === "absolute" ? Number( hedgehog_server.inbound_capacity_fee ) : Number( ( Number( channel_capacity ) * Number( ( Number( hedgehog_server.inbound_capacity_fee ) / 100 ).toFixed( 2 ) ) ).toFixed( 2 ) );
-                                //     var cost_of_fee_invoice = hedgehog_server.satsToBitcoin( cost_of_channel );
-                                //     cost_of_fee_invoice = Number( cost_of_fee_invoice );
-                                //     var fee_invoice_preimage = super_nostr.getPrivkey();
-                                //     var fee_invoice_pmthash = await super_nostr.sha256( super_nostr.hexToBytes( fee_invoice_preimage ) );
-                                //     var encrypted_fee_preimage = await super_nostr.alt_encrypt( hedgehog_server.nostr_privkey, nostr_pubkey, fee_invoice_preimage );
-
-                                //     //make the fee invoice
-                                //     var method = 'add_hold_invoice';
-                                //     var params = {payment_hash: fee_invoice_pmthash, amount: cost_of_fee_invoice, memo: ""};
-                                //     var fee_invoice_data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
-                                //     if ( fee_invoice_data.error && fee_invoice_data.error.message ) error = fee_invoice_data.error.message;
-                                //     else fee_invoice = fee_invoice_data.result.invoice;
-
-                                //     //TODO: if there is an error, return it                        
-                                // }
 
                                 //prepare a channel keypair
                                 var channel_privkey = hedgehog.getPrivkey();
@@ -2802,7 +2815,7 @@
                                 //save the data for later use
                                 //TODO: save the change address privkey for use later
                                 var network_string = hedgehog_server.network_string;
-                                var data_to_save = {
+                                var data_for_channel_open = {
                                     utxos: utxos_ill_use || error,
                                     channel_pubkey_and_hash: {pubkey: channel_pubkey, hash: channel_hash},
                                     cost_of_channel,
@@ -2813,13 +2826,24 @@
                                     need_fee_payment,
                                     network_string,
                                 }
-                                if ( need_fee_payment ) data_to_save.fee_address = fee_address;
-                                hedgehog_server.data_for_channel_opens[ event.pubkey ] = data_to_save;
+                                if ( need_fee_payment && !hedgehog_server.ln_support ) data_for_channel_open.fee_address = fee_address;
+                                if ( need_fee_payment && hedgehog_server.ln_support ) {
+                                    data_for_channel_open.fee_invoice = fee_invoice;
+                                    data_for_channel_open.fee_invoice_preimage = fee_invoice_preimage;
+                                }
+                                hedgehog_server.data_for_channel_opens[ event.pubkey ] = data_for_channel_open;
 
                                 //send the data to the user
+                                var reply_params = {
+                                    ...hedgehog_server.data_for_channel_opens[ event.pubkey ],
+                                    subscription_required: !!hedgehog_server.subscription_info.interval,
+                                    subscription_start_time: !!hedgehog_server.subscription_info.interval ? Math.floor( Date.now() / 1000 ) + hedgehog_server.subscription_info.interval : undefined,
+                                    privkey_to_reply_to_me_with: hedgehog.getPrivkey(),
+                                }
+                                if ( need_fee_payment && hedgehog_server.ln_support ) reply_params.fee_invoice = fee_invoice;
                                 var message_for_user = JSON.stringify({
                                     msg_type: "channel_request_reply",
-                                    msg_value: {...hedgehog_server.data_for_channel_opens[ event.pubkey ], subscription_required: !!hedgehog_server.subscription_info.interval, subscription_start_time: !!hedgehog_server.subscription_info.interval ? Math.floor( Date.now() / 1000 ) + hedgehog_server.subscription_info.interval : undefined, privkey_to_reply_to_me_with: hedgehog.getPrivkey()},
+                                    msg_value: reply_params,
                                 });
                                 var privkey = hedgehog_server.nostr_privkey;
                                 var pubkey = nostr_pubkey;
@@ -2843,6 +2867,8 @@
                                 var txfee = prev_data.fee;
                                 var change_address = prev_data.change_address;
                                 var need_fee_payment = prev_data.need_fee_payment;
+                                var fee_invoice_preimage = null;
+                                if ( need_fee_payment && hedgehog_server.ln_support ) fee_invoice_preimage = prev_data.fee_invoice_preimage;
                                 var sum_of_utxos = 0;
                                 prev_data.utxos.forEach( utxo => sum_of_utxos = sum_of_utxos + utxo.amnt );
                                 var channel_scripts = hedgehog.getChannelScripts( chan_id );
@@ -2870,7 +2896,6 @@
                                 var sig = tapscript.Signer.taproot.sign( tx_priv, funding_tx, 0 );
                                 funding_tx.vin[ 0 ].witness = [ sig ];
                                 var funding_txhex = tapscript.Tx.encode( funding_tx ).hex;
-
                                 delete hedgehog_server.data_for_channel_opens[ event.pubkey ];
 
                                 var funding_txid = tapscript.Tx.util.getTxid( funding_tx );
@@ -2878,24 +2903,40 @@
                                 if ( hedgehog.state[ chan_id ].funding_txinfo[ 1 ] !== 0 ) return;
 
                                 if ( need_fee_payment ) {
-                                    var fee_address = prev_data.fee_address;
-                                    var cost_of_channel = prev_data.cost_of_channel;
                                     //wait til fee is paid
-                                    var my_network = network_string.split( "," );
-                                    var loop = async () => {
-                                        console.log( `checking if fee is paid to this address: ${fee_address}` );
-                                        var utxos = await chain_client.commander( my_network, "utxos", fee_address );
-                                        var sum_of_utxos = 0;
-                                        utxos.forEach( utxo => sum_of_utxos = sum_of_utxos + utxo.value );
-                                        if ( sum_of_utxos >= cost_of_channel ) return;
-                                        await super_nostr.waitSomeSeconds( 1 );
-                                        return loop();
+                                    //TODO: abort if the payment takes too long
+                                    if ( hedgehog_server.ln_support ) {
+                                        var fee_invoice = prev_data.fee_invoice;
+                                        var loop = async () => {
+                                            var nwc_string = hedgehog_server.nwc_string;
+                                            var nwc_info = nwcjs.processNWCstring( nwc_string );
+                                            var delay_tolerance = 6;
+                                            var status = await nwcjs.checkInvoice( nwc_info, fee_invoice, delay_tolerance );
+                                            if ( status.hasOwnProperty( "result" ) && status.result.hasOwnProperty( "hodl_status" ) && typeof status.result.hodl_status === "string" && status.result.hodl_status.includes( "PAYMENT_DETECTED" ) && !status.result.hodl_status.includes( "NO_PAYMENT_DETECTED" ) && status.result.type === "incoming" ) return;
+                                            await hedgehog_server.waitSomeTime( 5_000 );
+                                            return loop();
+                                        }
+                                        var channel_cost_is_paid = await loop();
+                                    } else {
+                                        var fee_address = prev_data.fee_address;
+                                        var cost_of_channel = prev_data.cost_of_channel;
+                                        var my_network = network_string.split( "," );
+                                        var loop = async () => {
+                                            var utxos = await chain_client.commander( my_network, "utxos", fee_address );
+                                            var sum_of_utxos = 0;
+                                            utxos.forEach( utxo => sum_of_utxos = sum_of_utxos + utxo.value );
+                                            if ( sum_of_utxos >= cost_of_channel ) return;
+                                            await super_nostr.waitSomeSeconds( 1 );
+                                            return loop();
+                                        }
+                                        var channel_cost_is_paid = await loop();
                                     }
-                                    var fee_invoice_is_paid = await loop();
+
+                                    //tell user payment was detected
                                     hedgehog_server.comms_keys[ chan_id ].last_service_payment = Math.floor( Date.now() / 1000 );
                                     var message_for_user = JSON.stringify({
                                         msg_type: "channel_init_reply",
-                                        msg_value: 'fee invoice is paid',
+                                        msg_value: 'channel cost is paid',
                                     });
                                     var privkey = hedgehog_server.nostr_privkey;
                                     var pubkey = nostr_pubkey;
@@ -2905,13 +2946,18 @@
                                     hedgehog_server.sendEvent( event, hedgehog_server.nostr_relays[ 0 ] );
                                 }
 
-                                //broadcast the tx
-                                //TODO: actually broadcast it
-                                console.log( 'I am broadcasting this funding tx:' );
-                                console.log( funding_txhex );
+                                //broadcast the channel funding tx
                                 var my_network = network_string.split( "," );
                                 var txhex = await chain_client.commander( my_network, "broadcast", funding_txhex );
                                 if ( !hedgehog_server.isValidHex( txhex ) ) console.log( `error: ${txhex}` );
+                                else {
+                                    //settle hodl invoice, if any
+                                    if ( need_fee_payment && hedgehog_server.ln_support && fee_invoice_preimage ) {
+                                        var nwc_string = hedgehog_server.nwc_string;
+                                        var nwc_info = nwcjs.processNWCstring( nwc_string );
+                                        nwcjs.settleHodlInvoice( nwc_info, fee_invoice_preimage );
+                                    }
+                                }
                                 return;
                             }
                             if ( json.msg_type === "request_hh_pmt_to_user" ) {
@@ -3169,8 +3215,7 @@
                                 var loop = async () => {
                                     var delay_tolerance = 6;
                                     var status = await nwcjs.checkInvoice( nwc_info, ln_invoice, delay_tolerance );
-                                    console.log( status );
-                                    if ( status.hasOwnProperty( "result" ) && status.result.hasOwnProperty( "hodl_status" ) && typeof status.result.hodl_status === "string" && status.result.hodl_status.includes( "PAYMENT_DETECTED" ) && !status.result.hodl_status.includes( "NO_PAYMENT_DETECTED" ) ) return;
+                                    if ( status.hasOwnProperty( "result" ) && status.result.hasOwnProperty( "hodl_status" ) && typeof status.result.hodl_status === "string" && status.result.hodl_status.includes( "PAYMENT_DETECTED" ) && !status.result.hodl_status.includes( "NO_PAYMENT_DETECTED" ) && status.result.type === "incoming" ) return;
                                     await hedgehog_server.waitSomeTime( 5_000 );
                                     return loop();
                                 }
@@ -3872,7 +3917,7 @@
                     connection_type: "nostr",
                     connection_string: hedgehog_server.convertPubkeyAndRelaysToNprofile( "nprofile", hedgehog_server.nostr_pubkey, hedgehog_server.nostr_relays ),
                     network_string: hedgehog_server.network_string,
-                    ln_support: true,
+                    ln_support: hedgehog_server.ln_support,
                     use_rest: hedgehog_server.use_rest,
                     rest_endpoint: hedgehog_server.use_rest ? hedgehog_server.rest_endpoint : undefined,
                     subscription_info: hedgehog_server.subscription_info,
