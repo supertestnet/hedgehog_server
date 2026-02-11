@@ -26,7 +26,7 @@
             var hedgehog = {
                 state: {},
                 keypairs: {},
-                network: "testnet",
+                address_format: "regtest",
                 backup_pubkey: "a".repeat( 64 ),
                 anchor_value: 0,
                 hexToBytes: hex => Uint8Array.from( hex.match( /.{1,2}/g ).map( byte => parseInt( byte, 16 ) ) ),
@@ -36,7 +36,7 @@
                 getAddressData: ( scripts, index ) => {
                     var tree = scripts.map( s => tapscript.Tap.encodeScript( s ) );
                     var [ tpubkey, cblock ] = tapscript.Tap.getPubKey( hedgehog.backup_pubkey, { tree, target: tree[ index ] });
-                    var address = tapscript.Address.p2tr.fromPubKey( tpubkey, hedgehog.network );
+                    var address = tapscript.Address.p2tr.fromPubKey( tpubkey, hedgehog.address_format );
                     return [ address, tree, cblock ];
                 },
                 getChannelScripts: chan_id => {
@@ -1710,7 +1710,7 @@
                         if ( am_alice ) alt_tx2.vin[ 0 ].witness = [ revsig, mysig, midstate_scripts[ 0 ], midstate_cblock ];
 
                         //get utxos to cover the fees
-                        var addy = tapscript.Address.fromScriptPubKey( [ 1, pubkey ], hedgehog.network );
+                        var addy = tapscript.Address.fromScriptPubKey( [ 1, pubkey ], hedgehog.address_format );
                         if ( !txdata ) {
                             console.log( 'send 500 sats into this address:' );
                             console.log( addy );
@@ -1816,7 +1816,7 @@
                     else tx2.vin[ 0 ].witness = [ recipients_finalizer_sig, senders_finalizer_sig, midstate_scripts[ 0 ], midstate_cblock ];
 
                     //prepare a tx that pays the fee for tx1
-                    var addy = tapscript.Address.fromScriptPubKey( [ 1, pubkey ], hedgehog.network );
+                    var addy = tapscript.Address.fromScriptPubKey( [ 1, pubkey ], hedgehog.address_format );
                     if ( !txdata ) {
                         console.log( 'send 1000 sats into this address:' );
                         console.log( addy );
@@ -2174,6 +2174,9 @@
                 //TODO: do not hard-code this nostr privkey; the server should make one at random and then set their rest server, if any, to use it
                 nostr_privkey: "93227dfc17a3a80ff230dd7a95b6d024bffa1d89cf263b9bf3e2311af6ae265f",
                 nostr_pubkey: null,
+                network_type: "regtest",
+                // network_type: "testnet_generator",
+                network_privkey: null,
                 network_string: null,
                 utxos_privkey: null,
                 utxos_pubkey: null,
@@ -2211,7 +2214,6 @@
                     var handleFunction = async message => {
                         var [ type, subId, event ] = JSON.parse( message.data );
                         if ( !event || event === true ) return;
-                        var network_string = hedgehog_server.network_string;
                         try {
                             event.content = await super_nostr.alt_decrypt( hedgehog_server.nostr_privkey, event.pubkey, event.content );
                             var json = JSON.parse( event.content );
@@ -2521,10 +2523,10 @@
                                 var swap_fee = 500;
                                 var htlc_amnt = pending_htlc.amnt - swap_fee;
                                 if ( htlc_amnt < 546 ) return console.log( `aborting because someone wants to do an L1 swap that would create a utxo with a value below bitcoin's dust limit` );
-                                var my_network = network_string.split( "," );
+                                var my_network = hedgehog_server.network_type === "testnet_generator" ? hedgehog_server.network_string.split( "," ) : hedgehog_server.network_string;
                                 console.log( `time to fund the htlc!` );
-                                console.log( `you can send money to the htlc like this:` );
-                                console.log( `var my_network = "${network_string}".split( "," );chain_client.commander( my_network, "send", {destino: "${htlc_addy}", amnt: ${htlc_amnt}, feerate: 1} )` );
+                                console.log( `if you are using testnet generator, you can send money to the htlc like this:` );
+                                console.log( `var my_network = hedgehog_server.network_type === "testnet_generator" ? hedgehog_server.network_string.split( "," ) : hedgehog_server.network_string;chain_client.commander( my_network, "send", {destino: "${htlc_addy}", amnt: ${htlc_amnt}, feerate: 1} )` );
 
                                 //check its status on loop
                                 var loop = async () => {
@@ -2581,26 +2583,24 @@
 
                                     //wait for 10 confirmations
                                     var txhex = tapscript.Tx.encode( sweep_tx ).hex;
-                                    var msg = `wait til all of these txs confirm:`;
-                                    var msg = `click ok when these transactions all have 10 confirmations:`;
+                                    var msg = `wait til all of these txs have 10 confirmations:`;
                                     utxos_to_sweep.forEach( utxo => msg += `\n${utxo.txid}` );
+                                    console.log( msg );
 
                                     //broadcast the sweep tx
-                                    console.log( 'broadcast this:', txhex );
+                                    console.log( 'then broadcast this:', txhex );
                                     console.log( `you can broadcast the tx like this:` );
-                                    console.log( `var my_network = "${network_string}".split( "," );chain_client.commander( my_network, "broadcast", "${txhex}" )` );
+                                    console.log( `var my_network = hedgehog_server.network_type === "testnet_generator" ? hedgehog_server.network_string.split( "," ) : hedgehog_server.network_string;chain_client.commander( my_network, "broadcast", "${txhex}" )` );
 
                                     //TODO: in case the user initiates a race condition after you broadcast your sweep tx (by broadcasting one of their own), continue to watch the mempool and the block for their preimage until your sweep tx has 3 confirmations, and if you see their preimage, use it to take the money from the htlc created by your force close transaction
                                     return;
                                 }
 
                                 //get the user's sweep tx
-                                var my_network = network_string.split( "," );
+                                var my_network = hedgehog_server.network_type === "testnet_generator" ? hedgehog_server.network_string.split( "," ) : hedgehog_server.network_string;
                                 var spend_txs = await chain_client.commander( my_network, "spend_txs", htlc_addy );
                                 var sweep_txid = spend_txs[ 0 ].substring( 0, 64 );
                                 var sweep_tx = await chain_client.commander( my_network, "rawtx", sweep_txid );
-                                console.log( `here is the user's sweep tx:` );
-                                console.log( sweep_tx );
 
                                 //get the preimage from the sweep tx
                                 var preimage = null;
@@ -2616,9 +2616,6 @@
                                     }
                                     if ( preimage ) break;
                                 }
-                                console.log( `here is the preimage from the user's sweep tx:`, preimage );
-                                await hedgehog_server.waitSomeTime( 10 );
-                                var preimage = prompt( `enter the preimage from the user's sweep tx` );
                                 extra_outputs[ index_of_pending_htlc ].pmt_preimage = preimage;
 
                                 //ask your counterparty to resolve the htlc whenever they are online
@@ -2678,14 +2675,15 @@
                                         if ( item.address === utxo.address ) num_of_utxos_that_use_this_address = num_of_utxos_that_use_this_address + 1;
                                     });
                                     if ( num_of_utxos_that_use_this_address > 1 ) return true;
-                                    utxos_ill_use.push({
+                                    var utxo_to_push = {
                                         utxo_id: utxo.utxo_id,
                                         txid: utxo.prevout_hash,
                                         vout: utxo.prevout_n,
                                         addy: utxo.address,
                                         amnt,
                                         skey: utxo.privkey,
-                                    });
+                                    }
+                                    utxos_ill_use.push( utxo_to_push );
                                 });
                                 if ( !utxos_ill_use.length ) error = "not enough money to fund this channel";
 
@@ -2708,6 +2706,7 @@
 
                                 // var wif = priv_str.split( ":" )[ 1 ];
                                 // var hex_priv = hedgehog_server.getHexFromWif( wif );
+                                if ( error ) return alert( 'something went wrong' );
                                 var hex_priv = utxos_ill_use[ 0 ].skey;
                                 var encrypted_hex_priv = await super_nostr.alt_encrypt( hedgehog_server.nostr_privkey, nostr_pubkey, hex_priv );
 
@@ -2767,7 +2766,7 @@
                                         cost_of_fee_address = Number( cost_of_fee_address ).toFixed( 7 );
                                         var fee_privkey = super_nostr.getPrivkey();
                                         var fee_pubkey = super_nostr.getPubkey( fee_privkey );
-                                        var fee_address = tapscript.Address.fromScriptPubKey( [ 1, fee_pubkey ], hedgehog.network );
+                                        var fee_address = tapscript.Address.fromScriptPubKey( [ 1, fee_pubkey ], hedgehog.address_format );
                                     }
                                 } else {
                                     // var fee_invoice = null;
@@ -2814,7 +2813,6 @@
 
                                 //save the data for later use
                                 //TODO: save the change address privkey for use later
-                                var network_string = hedgehog_server.network_string;
                                 var data_for_channel_open = {
                                     utxos: utxos_ill_use || error,
                                     channel_pubkey_and_hash: {pubkey: channel_pubkey, hash: channel_hash},
@@ -2824,7 +2822,8 @@
                                     channel_capacity,
                                     encrypted_hex_priv,
                                     need_fee_payment,
-                                    network_string,
+                                    network_type: hedgehog_server.network_type,
+                                    network_string: hedgehog_server.network_string,
                                 }
                                 if ( need_fee_payment && !hedgehog_server.ln_support ) data_for_channel_open.fee_address = fee_address;
                                 if ( need_fee_payment && hedgehog_server.ln_support ) {
@@ -2920,7 +2919,7 @@
                                     } else {
                                         var fee_address = prev_data.fee_address;
                                         var cost_of_channel = prev_data.cost_of_channel;
-                                        var my_network = network_string.split( "," );
+                                        var my_network = hedgehog_server.network_type === "testnet_generator" ? hedgehog_server.network_string.split( "," ) : hedgehog_server.network_string;
                                         var loop = async () => {
                                             var utxos = await chain_client.commander( my_network, "utxos", fee_address );
                                             var sum_of_utxos = 0;
@@ -2947,7 +2946,7 @@
                                 }
 
                                 //broadcast the channel funding tx
-                                var my_network = network_string.split( "," );
+                                var my_network = hedgehog_server.network_type === "testnet_generator" ? hedgehog_server.network_string.split( "," ) : hedgehog_server.network_string;
                                 var txhex = await chain_client.commander( my_network, "broadcast", funding_txhex );
                                 if ( !hedgehog_server.isValidHex( txhex ) ) console.log( `error: ${txhex}` );
                                 else {
@@ -3015,8 +3014,7 @@
                                 //add a buffer, because if you force close exactly 20 blocks before your inbound payment expires, you risk a race condition, as the first moment you can recover your money from your outbound payment is also the moment they get their money back, so if they sweep your payment with the preimage at that moment, and you grab the preimage from the blockchain (or mempool) and try to settle your inbound payment with it, in that same block they get to try to try to recover their money via the absolute timelock path, and then miners pick who actually gets the money, because that's a race condition
                                 var htlc_buffer = 10;
                                 //TODO: handle any errors returned by the fetch command below
-                                var network_string = hedgehog_server.network_string;
-                                var my_network = network_string.split( "," );
+                                var my_network = hedgehog_server.network_type === "testnet_generator" ? hedgehog_server.network_string.split( "," ) : hedgehog_server.network_string;
                                 var current_blockheight = await chain_client.commander( my_network, "blockheight" );
                                 // var bh_data = await fetch( `https://${hedgehog_server.explorer}/${hedgehog_server.network}api/blocks/tip/height` );
                                 // var current_blockheight = await bh_data.text();
@@ -3033,6 +3031,7 @@
                                 var success_pmthash = await hedgehog.sendHtlc( chan_id, check_amount, relative_timelock, absolute_timelock, htlc_pmthash, block_when_i_must_force_close );
                                 if ( success_pmthash !== htlc_pmthash ) {
                                     delete hedgehog_server.pmthashes_with_htlcs_that_need_resolving[ pmthash ];
+                                    //TODO: if there was an inbound htlc associated with this payment from another hedgehog user, resolve it back to the sender
                                     return `error: ${success_pmthash}`;
                                 }
                                 return;
@@ -3068,7 +3067,7 @@
                                 hedgehog_server.sendEvent( event, hedgehog_server.nostr_relays[ 0 ] );
 
                                 //wait til swap address is funded
-                                var my_network = network_string.split( "," );
+                                var my_network = hedgehog_server.network_type === "testnet_generator" ? hedgehog_server.network_string.split( "," ) : hedgehog_server.network_string;
                                 var loop = async () => {
                                     var utxos = await chain_client.commander( my_network, "utxos", swap_address );
                                     var sum_of_utxos = 0;
@@ -3093,8 +3092,7 @@
                                 //add a buffer, because if you force close exactly 20 blocks before your inbound payment expires, you risk a race condition, as the first moment you can recover your money from your outbound payment is also the moment they get their money back, so if they sweep your payment with the preimage at that moment, and you grab the preimage from the blockchain (or mempool) and try to settle your inbound payment with it, in that same block they get to try to try to recover their money via the absolute timelock path, and then miners pick who actually gets the money, because that's a race condition
                                 var htlc_buffer = 10;
                                 //TODO: handle any errors returned by the fetch command below
-                                var network_string = hedgehog_server.network_string;
-                                var my_network = network_string.split( "," );
+                                var my_network = hedgehog_server.network_type === "testnet_generator" ? hedgehog_server.network_string.split( "," ) : hedgehog_server.network_string;
                                 var current_blockheight = await chain_client.commander( my_network, "blockheight" );
                                 // var bh_data = await fetch( `https://${hedgehog_server.explorer}/${hedgehog_server.network}api/blocks/tip/height` );
                                 // var current_blockheight = await bh_data.text();
@@ -3154,7 +3152,7 @@
                                 }
                                 loop();
                                 var success_pmthash = await hedgehog.sendHtlc( chan_id, htlc_amnt, relative_timelock, absolute_timelock, htlc_pmthash, block_when_i_must_force_close );
-                                if ( success_pmthash !== swap_address_hash ) return console.log( `error: ${success_pmthash}` );
+                                if ( success_pmthash !== swap_address_hash ) console.log( `error: ${success_pmthash}` );
                                 return;
                             }
                             if ( json.msg_type === "request_ln_pmt_to_user" ) {
@@ -3258,8 +3256,7 @@
                                 //add a buffer, because if you force close exactly 20 blocks before your inbound payment expires, you risk a race condition, as the first moment you can recover your money from your outbound payment is also the moment they get their money back, so if they sweep your payment with the preimage at that moment, and you grab the preimage from the blockchain (or mempool) and try to settle your inbound payment with it, in that same block they get to try to try to recover their money via the absolute timelock path, and then miners pick who actually gets the money, because that's a race condition
                                 var htlc_buffer = 10;
                                 //TODO: handle any errors returned by the fetch command below
-                                var network_string = hedgehog_server.network_string;
-                                var my_network = network_string.split( "," );
+                                var my_network = hedgehog_server.network_type === "testnet_generator" ? hedgehog_server.network_string.split( "," ) : hedgehog_server.network_string;
                                 var current_blockheight = await chain_client.commander( my_network, "blockheight" );
                                 // var bh_data = await fetch( `https://${hedgehog_server.explorer}/${hedgehog_server.network}api/blocks/tip/height` );
                                 // var current_blockheight = await bh_data.text();
@@ -3270,7 +3267,10 @@
                                 hedgehog_server.comms_keys[ chan_id ][ "last_activity" ] = Math.floor( Date.now() / 1000 );
                                 var absolute_timelock = 0;
                                 var success_pmthash = await hedgehog.sendHtlc( chan_id, htlc_amnt, relative_timelock, absolute_timelock, htlc_pmthash, block_when_i_must_force_close );
-                                if ( success_pmthash !== ln_invoice_pmthash ) return console.log( `error: ${success_pmthash}` );
+                                if ( success_pmthash !== ln_invoice_pmthash ) {
+                                    //TODO: if there was an inbound LN payment associated with this payment, cancel it
+                                    return console.log( `error: ${success_pmthash}` );
+                                }
                                 return;
                             }
                             if ( json.msg_type === "resolve_htlc_to_user_part_one" ) {
@@ -3891,6 +3891,7 @@
         </div>
         <div class="webpage dashboard hidden">
             <h1>Dashboard</h1>
+            <p>L1 address: <span class="L1_address">loading...</span></p>
             <p>L1 balance: <span class="L1_balance">loading...</span></p>
             <p class="bold">Server id</p>
             <p class="server_id">loading...</p>
@@ -3913,37 +3914,47 @@
                 hedgehog_server.nwc_string = prompt( `enter an nwc string` );
                 if ( !hedgehog_server.nwc_string || !hedgehog_server.nwc_string.startsWith( "nostr+walletconnect://" ) ) return alert( 'that nwc string was not valid, try again' );
                 hedgehog_server.nostr_pubkey = super_nostr.getPubkey( hedgehog_server.nostr_privkey );
+                hedgehog_server.utxos_privkey = super_nostr.getPrivkey();
+                hedgehog_server.utxos_pubkey = super_nostr.getPubkey( hedgehog_server.utxos_privkey );
+                hedgehog_server.utxos_addy = tapscript.Address.fromScriptPubKey( [ 1, hedgehog_server.utxos_pubkey ], hedgehog.address_format );
+                if ( hedgehog_server.network_type === "testnet_generator" ) {
+                    console.log( 'setting up testnet...' );
+                    var promiseA = async () => {
+                        return await chain_client.createNetwork( [ hedgehog_server.nostr_relays[ 0 ] ] );
+                    }
+                    var promiseB = async () => {
+                        await super_nostr.waitSomeTime( 30_000 );
+                        return "timed out";
+                    }
+                    var reply = await Promise.any( [ promiseA(), promiseB() ] );
+                    if ( reply === "timed out" ) return alert( `could not connect to nostr relay, try again` );
+                    var [ network_privkey, network_string ] = reply;
+                    hedgehog_server.network_privkey = network_privkey;
+                    hedgehog_server.network_string = network_string;
+                    console.log( 'testnet is set up!' );
+                    console.log( 'getting coins...' );
+                    var my_network = hedgehog_server.network_type === "testnet_generator" ? hedgehog_server.network_string.split( "," ) : hedgehog_server.network_string;
+                    await chain_client.commander( my_network, "genblock" );
+                    var amnt = 500_000;
+                    await chain_client.commander( my_network, "send", {destino: hedgehog_server.utxos_addy, amnt, feerate: 1} );
+                } else {
+                    var network_string = prompt( `enter the websocket endpoint of an electrum server you want to use`, 'ws://127.0.0.1:50050' );
+                    hedgehog_server.network_string = network_string;
+                }
                 var server_id = hedgehog_server.textToHex( JSON.stringify({
                     connection_type: "nostr",
                     connection_string: hedgehog_server.convertPubkeyAndRelaysToNprofile( "nprofile", hedgehog_server.nostr_pubkey, hedgehog_server.nostr_relays ),
+                    network_type: hedgehog_server.network_type,
                     network_string: hedgehog_server.network_string,
                     ln_support: hedgehog_server.ln_support,
                     use_rest: hedgehog_server.use_rest,
                     rest_endpoint: hedgehog_server.use_rest ? hedgehog_server.rest_endpoint : undefined,
                     subscription_info: hedgehog_server.subscription_info,
                 }) );
-                console.log( 'setting up testnet...' );
-                var promiseA = async () => {
-                    return await chain_client.createNetwork( [ hedgehog_server.nostr_relays[ 0 ] ] );
-                }
-                var promiseB = async () => {
-                    await super_nostr.waitSomeTime( 30_000 );
-                    return "timed out";
-                }
-                var reply = await Promise.any( [ promiseA(), promiseB() ] );
-                if ( reply === "timed out" ) return alert( `could not connect to nostr relay, try again` );
-                var [ network_privkey, network_string ] = reply;
-                hedgehog_server.network_string = network_string;
-                console.log( 'testnet is set up!' );
-                console.log( 'getting coins...' );
-                await chain_client.commander( network_string.split( "," ), "genblock" );
-                hedgehog_server.utxos_privkey = super_nostr.getPrivkey();
-                hedgehog_server.utxos_pubkey = super_nostr.getPubkey( hedgehog_server.utxos_privkey );
-                hedgehog_server.utxos_addy = tapscript.Address.fromScriptPubKey( [ 1, hedgehog_server.utxos_pubkey ], hedgehog.network );
-                var amnt = 500_000;
-                await chain_client.commander( network_string.split( "," ), "send", {destino: hedgehog_server.utxos_addy, amnt, feerate: 1} );
+                $( '.L1_address' ).innerText = hedgehog_server.utxos_addy;
                 var utxoLoop = async () => {
-                    var utxos = await chain_client.commander( network_string.split( "," ), "utxos", hedgehog_server.utxos_addy );
+                    var my_network = hedgehog_server.network_type === "testnet_generator" ? hedgehog_server.network_string.split( "," ) : hedgehog_server.network_string;
+                    var utxos = await chain_client.commander( my_network, "utxos", hedgehog_server.utxos_addy );
                     var utxos_to_push = {}
                     utxos.forEach( utxo => {
                         var utxo_id = "u_" + utxo.txid + "_" + utxo.vout;
