@@ -218,7 +218,8 @@
                                 continue;
                             }
                         }
-                        var url = `${window.location.protocol}//${window.location.hostname}/${window.location.pathname}#check=${check_id}`;
+                        var pathname = window.location.pathname.substring( 0, window.location.pathname.lastIndexOf( "/" ) + 1 ) + "ln_version.html";
+                        var url = `${window.location.protocol}//${window.location.hostname}/${pathname}#check=${check_id}`;
                         var check_amount = check.check_amount;
                         var check_state = JSON.stringify({
                             amount: check_amount,
@@ -228,7 +229,7 @@
                         var prev_state = $( `.${check_id}` ) ? $( `.${check_id}` ).getAttribute( "data-check_state" ) : null;
                         if ( check_state !== prev_state ) state_changed = true;
                         var check_timelock = new Date( check.check_absolute_timelock * 1000 );
-                        check_timelock.setMinutes( check_timelock.getMinutes() - check_timelock.getTimezoneOffset() );
+                        // check_timelock.setMinutes( check_timelock.getMinutes() - check_timelock.getTimezoneOffset() );
                         var check_tl_date = check_timelock.toLocaleDateString( "en-ca" );
                         var check_tl_time = check_timelock.toLocaleTimeString();
                         var now = Math.floor( Date.now() / 1000 );
