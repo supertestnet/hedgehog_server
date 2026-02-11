@@ -29,7 +29,7 @@
             var hedgehog = {
                 state: {},
                 keypairs: {},
-                network: "testnet",
+                address_format: "regtest",
                 backup_pubkey: "a".repeat( 64 ),
                 anchor_value: 0,
                 hexToBytes: hex => Uint8Array.from( hex.match( /.{1,2}/g ).map( byte => parseInt( byte, 16 ) ) ),
@@ -39,7 +39,7 @@
                 getAddressData: ( scripts, index ) => {
                     var tree = scripts.map( s => tapscript.Tap.encodeScript( s ) );
                     var [ tpubkey, cblock ] = tapscript.Tap.getPubKey( hedgehog.backup_pubkey, { tree, target: tree[ index ] });
-                    var address = tapscript.Address.p2tr.fromPubKey( tpubkey, hedgehog.network );
+                    var address = tapscript.Address.p2tr.fromPubKey( tpubkey, hedgehog.address_format );
                     return [ address, tree, cblock ];
                 },
                 getChannelScripts: chan_id => {
@@ -1713,7 +1713,7 @@
                         if ( am_alice ) alt_tx2.vin[ 0 ].witness = [ revsig, mysig, midstate_scripts[ 0 ], midstate_cblock ];
 
                         //get utxos to cover the fees
-                        var addy = tapscript.Address.fromScriptPubKey( [ 1, pubkey ], hedgehog.network );
+                        var addy = tapscript.Address.fromScriptPubKey( [ 1, pubkey ], hedgehog.address_format );
                         if ( !txdata ) {
                             console.log( 'send 500 sats into this address:' );
                             console.log( addy );
@@ -1819,7 +1819,7 @@
                     else tx2.vin[ 0 ].witness = [ recipients_finalizer_sig, senders_finalizer_sig, midstate_scripts[ 0 ], midstate_cblock ];
 
                     //prepare a tx that pays the fee for tx1
-                    var addy = tapscript.Address.fromScriptPubKey( [ 1, pubkey ], hedgehog.network );
+                    var addy = tapscript.Address.fromScriptPubKey( [ 1, pubkey ], hedgehog.address_format );
                     if ( !txdata ) {
                         console.log( 'send 1000 sats into this address:' );
                         console.log( addy );
@@ -2168,6 +2168,7 @@
         <script>
             var hedgehog_client = {
                 network: "testnet4/",
+                network_type: null,
                 network_string: null,
                 explorer: "mempool.space",
                 server: null,
@@ -2278,7 +2279,7 @@
                         var server_id = url_params.server_id;
                         hedgehog_client.server_id = server_id;
                         var server_info = JSON.parse( hedgehog_client.hexToText( server_id ) );
-                        var { connection_string, connection_type, ln_support, use_rest, rest_endpoint } = server_info;
+                        var { connection_string, connection_type, ln_support, use_rest, rest_endpoint, network_type, network_string } = server_info;
                         hedgehog_client.ln_support = ln_support;
                         hedgehog_client.use_rest = use_rest;
                         if ( use_rest ) hedgehog_client.rest_endpoint = rest_endpoint;
@@ -2287,6 +2288,8 @@
                             hedgehog_client.server = server;
                             hedgehog_client.relays = relays;
                         }
+                        hedgehog_client.network_type = network_type;
+                        hedgehog_client.network_string = network_string;
                     }
                     //TODO: load data from the nostr relays in your backup string so that you know what relays the server uses, which should be stored there
                     await hedgehog_client.listenForComms();
@@ -2473,9 +2476,13 @@
                     var json = JSON.parse( event.content );
                     if ( json.msg_type !== "channel_request_reply" ) return showModal( 'aborting -- server tried to cheat you by sending you bad data' );
 
+                    //tell the user what is going on
+                    showModal( `<p>validating server's utxo data...</p>` );
+
                     //validate the utxo data
                     if ( typeof json.msg_value.utxos === "string" ) return showModal( 'aborting -- server did not have enough money to fund this channel' );
-                    var network_string = json.msg_value.network_string;
+                    var {network_type, network_string} = json.msg_value;
+                    hedgehog_client.network_type = network_type;
                     hedgehog_client.network_string = network_string;
                     var cost_of_channel = json.msg_value.cost_of_channel;
                     var all_is_well = true;
@@ -2484,12 +2491,12 @@
                         var i; for ( i=0; i<json.msg_value.utxos.length; i++ ) {
                             var utxo = json.msg_value.utxos[ i ];
                             sum_of_utxos = sum_of_utxos + utxo.amnt;
-                            var addy_is_segwit = utxo.addy.startsWith( "tb1" ) || utxo.addy.startsWith( "bc1" );
+                            var addy_is_segwit = utxo.addy.startsWith( "tb1" ) || utxo.addy.startsWith( "bc1" ) || utxo.addy.startsWith( "bcrt1" );
                             if ( !addy_is_segwit ) {
                                 all_is_well = false;
                                 break;
                             }
-                            var utxo_exists = await hedgehog_client.utxoExists( utxo, network_string );
+                            var utxo_exists = await hedgehog_client.utxoExists( utxo, network_type, network_string );
                             if ( !utxo_exists ) {
                                 all_is_well = false;
                                 break;
@@ -2499,8 +2506,12 @@
                         if ( !all_is_well ) return showModal( 'aborting --- server tried to cheat you by sending you invalid utxo data' );
                     } catch ( e ) {each_utxo_is_valid = false;}
 
+                    //tell the user what is going on
+                    console.log( 'validating info about where to send payment' );
+                    showModal( `<p>validating info about where to send payment...</p>` );
+
+                    //validate the fee_address, if any
                     try {
-                        //validate the fee_address, if any
                         var fee_address = null;
                         if ( json.msg_value.hasOwnProperty( "fee_address" ) ) {
                             fee_address = json.msg_value.fee_address;
@@ -2572,6 +2583,10 @@
                         var skip_message = true;
                         var data_for_bob = await hedgehog.openChannel( bobs_pubkey_and_hash, txdata, null, chan_id, skip_message );
 
+                        //tell the user what is going on
+                        console.log( 'asking server to prepare funding transaction and awaiting their reply' );
+                        showModal( `<p>asking server to prepare funding transaction and awaiting their reply...</p>` );
+
                         //send channel data to server
                         var msg_for_server = JSON.stringify({
                             msg_type: "channel_init",
@@ -2579,7 +2594,7 @@
                         });
                         var emsg = await super_nostr.alt_encrypt( privkey, server, msg_for_server );
                         var event = await super_nostr.prepEvent( privkey, emsg, 4, [ [ "p", server ] ] );
-                        hedgehog_client.makeJITChannelPartThree( privkey, chan_id, fee_address, fee_invoice, cost_of_channel, network_string, skip_channel_payment );
+                        hedgehog_client.makeJITChannelPartThree( privkey, chan_id, fee_address, fee_invoice, cost_of_channel, skip_channel_payment );
                         hedgehog_client.sendEvent( event, hedgehog_client.relays[ 0 ] );
 
                         //cash check, if any
@@ -2595,7 +2610,7 @@
                         showModal( `aborting -- unknown error, ${e}` );
                     }
                 },
-                makeJITChannelPartThree: async ( privkey, chan_id, fee_address, fee_invoice, cost_of_channel, network_string, skip_channel_payment ) => {
+                makeJITChannelPartThree: async ( privkey, chan_id, fee_address, fee_invoice, cost_of_channel, skip_channel_payment ) => {
                     if ( fee_address ) {
                         //prepare the necessary variables
                         var pubkey = super_nostr.getPubkey( privkey );
@@ -2604,8 +2619,8 @@
                             setTimeout( () => {
                                 showModal( `<p>Paying ${cost_of_channel} sats to this address will buy you a channel with 80k sats of inbound capacity</p><p>${fee_address}</p>` );
                             }, 100 );
-                            console.log( `you can send money to the address like this:` );
-                            console.log( `var my_network = "${network_string}".split( "," );chain_client.commander( my_network, "send", {destino: "${fee_address}", amnt: 330, feerate: 1} )` );
+                            // console.log( `you can send money to the address like this:` );
+                            // console.log( `var my_network = hedgehog_client.network_type === "testnet_generator" ? hedgehog_client.network_string.split( "," ) : hedgehog_client.network_string;chain_client.commander( my_network, "send", {destino: "${fee_address}", amnt: 330, feerate: 1} )` );
                         }
                     }
                     if ( fee_invoice ) {
@@ -3179,12 +3194,12 @@
                     var text = new TextDecoder().decode( bytes );
                     return text;
                 },
-                utxoExists: async ( utxo, network_string ) => {
-                    var my_network = network_string.split( "," );
+                utxoExists: async ( utxo, network_type, network_string ) => {
+                    var my_network = network_type === "testnet_generator" ? network_string.split( "," ) : network_string;
                     var txhex = await chain_client.commander( my_network, "rawtx", utxo.txid );
                     var output = tapscript.Tx.decode( txhex ).vout[ utxo.vout ];
                     if ( Number( output.value ) !== utxo.amnt ) return;
-                    if ( tapscript.Address.fromScriptPubKey( output.scriptPubKey, hedgehog.network ) !== utxo.addy ) return;
+                    if ( tapscript.Address.fromScriptPubKey( output.scriptPubKey, hedgehog.address_format ) !== utxo.addy ) return;
                     return true;
                     // try {
                     //     return new Promise( async resolve => {
@@ -3247,6 +3262,11 @@
                     var htlc_pending = await hedgehog_client.send( chan_id, htlc_amnt, pmthash );
                     if ( !htlc_pending ) return console.log( 'error, no htlc was created' );
                     var senders_privkey = super_nostr.getPrivkey();
+
+                    //tell the user what is going on
+                    showModal( `<p>contacting server to set up atomic swap...</p>` );
+
+                    //contact server to set up atomic swap
                     hedgehog_client.askServerToPayL1Address( chan_id, pmthash, senders_privkey );
 
                     //get the htlc address
@@ -3258,8 +3278,7 @@
                     var [ htlc_addy, htlc_tree, htlc_cblock ] = hedgehog.getAddressData( htlc_scripts, 0 );
 
                     //check if the htlc got funded
-                    var network_string = hedgehog_client.network_string;
-                    var my_network = network_string.split( "," );
+                    var my_network = hedgehog_client.network_type === "testnet_generator" ? hedgehog_client.network_string.split( "," ) : hedgehog_client.network_string;
                     var loop = async () => {
                         console.log( `checking if htlc got funded: ${htlc_addy}` );
                         var utxos = await chain_client.commander( my_network, "utxos", htlc_addy );
@@ -3315,7 +3334,7 @@
                     var txhex = tapscript.Tx.encode( sweep_tx ).hex;
                     console.log( 'broadcast this:', txhex );
                     console.log( `you can broadcast the tx like this:` );
-                    console.log( `var my_network = "${network_string}".split( "," );chain_client.commander( my_network, "broadcast", "${txhex}" )` );
+                    console.log( `var my_network = hedgehog_client.network_type === "testnet_generator" ? hedgehog_client.network_string.split( "," ) : hedgehog_client.network_string;chain_client.commander( my_network, "broadcast", "${txhex}" )` );
                 },
                 askServerToPayLNInvoice: async ( chan_id, invoice ) => {
                     var privkey = hedgehog_client.nostr_privkey;
@@ -3654,7 +3673,7 @@
                         var prev_state = $( `.${check_id}` ) ? $( `.${check_id}` ).getAttribute( "data-check_state" ) : null;
                         if ( check_state !== prev_state ) state_changed = true;
                         var check_timelock = new Date( check.absolute_timelock * 1000 );
-                        check_timelock.setMinutes( check_timelock.getMinutes() - check_timelock.getTimezoneOffset() );
+                        // check_timelock.setMinutes( check_timelock.getMinutes() - check_timelock.getTimezoneOffset() );
                         var check_tl_date = check_timelock.toLocaleDateString( "en-ca" );
                         var check_tl_time = check_timelock.toLocaleTimeString();
                         var now = Math.floor( Date.now() / 1000 );
@@ -3772,7 +3791,7 @@
                                 if ( json.msg_value.startsWith( "irredeemable until" ) ) {
                                     var unlock_timestamp = Number( json.msg_value.substring( 19 ) );
                                     var check_timelock = new Date( unlock_timestamp * 1000 );
-                                    check_timelock.setMinutes( check_timelock.getMinutes() - check_timelock.getTimezoneOffset() );
+                                    // check_timelock.setMinutes( check_timelock.getMinutes() - check_timelock.getTimezoneOffset() );
                                     var check_tl_date = check_timelock.toLocaleDateString( "en-ca" );
                                     var check_tl_time = check_timelock.toLocaleTimeString();
                                     $( '.check_info' ).innerHTML = `This check is uncashable until ${check_tl_date} at ${check_tl_time}.`;
@@ -3835,7 +3854,7 @@
                                                 //prepare the swap
                                                 var privkey = super_nostr.getPrivkey();
                                                 var pubkey = super_nostr.getPubkey( privkey );
-                                                var { connection_string, network_string } = server_info;
+                                                var { connection_string, network_type, network_string } = server_info;
                                                 var [ server, servers_relays ] = hedgehog_client.convertNEvent( connection_string );
                                                 var preimage = check_preimage;
                                                 var pmthash = await hedgehog.sha256( hedgehog.hexToBytes( preimage ) );
@@ -3860,7 +3879,7 @@
                                                 var [ htlc_addy, htlc_tree, htlc_cblock ] = hedgehog.getAddressData( htlc_scripts, 0 );
 
                                                 //check if the htlc got funded
-                                                var my_network = network_string.split( "," );
+                                                var my_network = network_type === "testnet_generator" ? network_string.split( "," ) : network_string;
                                                 var loop = async () => {
                                                     console.log( `checking if htlc got funded: ${htlc_addy}` );
                                                     var utxos = await chain_client.commander( my_network, "utxos", htlc_addy );
@@ -3916,7 +3935,7 @@
                                                 var txhex = tapscript.Tx.encode( sweep_tx ).hex;
                                                 console.log( 'broadcast this:', txhex );
                                                 console.log( `you can broadcast the tx like this:` );
-                                                console.log( `var my_network = "${network_string}".split( "," );chain_client.commander( my_network, "broadcast", "${txhex}" )` );
+                                                console.log( `var network_type = "${network_type}";var network_string = "${network_string}";var my_network = network_type === "testnet_generator" ? network_string.split( "," ) : network_string;chain_client.commander( my_network, "broadcast", "${txhex}" )` );
                                             }
                                         }
                                         if ( $( '.check_to_ln' ) ) $( '.check_to_ln' ).onclick = async () => {
@@ -4296,6 +4315,7 @@
                     var check_server_id = hedgehog_client.textToHex( JSON.stringify({
                         connection_type: "nostr",
                         connection_string: hedgehog_client.convertPubkeyAndRelaysToNprofile( "nprofile", server, hedgehog_client.relays ),
+                        network_type: hedgehog_client.network_type,
                         network_string: hedgehog_client.network_string,
                         ln_support: hedgehog_client.ln_support,
                         use_rest: hedgehog_client.use_rest,
@@ -4560,6 +4580,7 @@
             <p><button class="receive">Receive</button></p>
             <p><button class="send">Send</button></p>
             <p><button class="checks">Cheques</button></p>
+            <p><button class="subscribe">Subscription</button></p>
             <p><button class="exit">Exit</button></p>
         </div>
         <div class="checks_page hidden">
@@ -4595,6 +4616,11 @@
                 var check = null;
                 if ( !chan_id ) check = prompt( `enter a check` );
                 hedgehog_client.receive( check );
+            }
+            $( '.subscribe' ).onclick = () => {
+                var subscription_string = prompt( `enter a subscription string` );
+                if ( !subscription_string ) return;
+                hedgehog_client.makeSubscription( hedgehog_client.getChanId(), subscription_string );
             }
             $( '.send' ).onclick = hedgehog_client.sendBtn;
             $( '.checks' ).onclick = hedgehog_client.showChecks;
